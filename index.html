@@ -124,7 +124,10 @@ async function apiSaveKintai(userId, date, entry) {
     start_time: entry.start || null,
     end_time: entry.end || null,
     break_min: entry.breakMin || 60,
-    is_remote: !!entry.remote
+   is_remote: !!entry.remote,
+loc_remote: !!entry.remote,
+loc_trip: !!entry.trip,
+loc_umeda: !!entry.umeda
   };
   const { error } = await sb.from('kintai_records').upsert(record, { onConflict: 'user_id,date' });
   if (error) throw error;
@@ -874,6 +877,8 @@ function openKM(k, uid) {
   document.getElementById('mk-e').value = e.end || '';
   document.getElementById('mk-b').value = e.breakMin != null ? e.breakMin : 60;
   document.getElementById('mk-r').checked = !!e.remote;
+document.getElementById('mk-trip').checked = !!e.trip;
+document.getElementById('mk-umeda').checked = !!e.umeda;
   document.getElementById('mk-del').style.display = (k && md[k]) ? '' : 'none';
   document.getElementById('mk').style.display = 'flex';
 }
@@ -1831,7 +1836,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <div class="fr"><label>区分</label><select id="mk-type"><option value="work">出勤</option><option value="paid">有給</option><option value="half">半休</option><option value="holiday">祝日</option><option value="remote">在宅</option></select></div>
   <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s" oninput="calcKintaiTime()"><input type="time" id="mk-e" oninput="calcKintaiTime()"></div></div>
   <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15"></div>
- <div class="fr"><label><input type="checkbox" id="mk-r" style="width:auto;margin-right:4px">在宅勤務</label></div>
+<div class="fr">
+  <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">勤務地（複数選択可）</label>
+  <div style="display:flex;gap:12px;flex-wrap:wrap">
+    <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-r" style="width:auto"> 在宅</label>
+    <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-trip" style="width:auto"> 出張</label>
+    <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-umeda" style="width:auto"> 梅田支店</label>
+  </div>
+</div>
 <div style="background:#f5f5f3;border-radius:8px;padding:.625rem .875rem;font-size:12px;color:#888;margin-bottom:4px">
   稼働時間：<strong id="mk-calc" style="color:#1a1a18;font-size:14px">—</strong>
   <span style="font-size:11px;margin-left:8px" id="mk-calc-sub"></span>
