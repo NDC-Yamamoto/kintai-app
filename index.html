@@ -31,6 +31,9 @@ let authUser = null;    // Supabase auth ユーザー
 let curY, curM;
 let projectsCache = [];
 let tasksMasterCache = [];
+let bizTypesCache = [];
+let workTypesCache = [];
+let templatesCache = [];
 
 // ============================================================
 // Supabase API ラッパー
@@ -142,16 +145,19 @@ async function apiFetchTasks(userId, year, month) {
   const map = {};
   (data || []).forEach(r => {
     if (!map[r.date]) map[r.date] = [];
-    map[r.date].push({ id: r.id, proj: r.project, task: r.task, h: parseFloat(r.hours) });
+    map[r.date].push({ id: r.id, proj: r.project, task: r.task, h: parseFloat(r.hours), biz_type: r.biz_type, work_type: r.work_type });
   });
   return map;
 }
 
 async function apiSaveTaskEntries(userId, date, entries) {
-  // 既存削除 → 全件INSERT
   await sb.from('task_entries').delete().eq('user_id', userId).eq('date', date);
   if (entries.length) {
-    const rows = entries.map(e => ({ user_id: userId, date, project: e.proj, task: e.task, hours: e.h }));
+    const rows = entries.map(e => ({
+      user_id: userId, date,
+      project: e.proj, task: e.task, hours: e.h,
+      biz_type: e.biz_type || null, work_type: e.work_type || null
+    }));
     const { error } = await sb.from('task_entries').insert(rows);
     if (error) throw error;
   }
@@ -177,10 +183,14 @@ async function apiAddPaidUsage(grantId, userId, date, days) {
 
 /** マスタ **/
 async function apiFetchMaster() {
-  const [{ data: projs }, { data: tasks }] = await Promise.all([
-    sb.from('projects').select('id, name, biz_type, work_type').order('id'),
-    sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id')
+  const [{ data: projs }, { data: tasks }, { data: bizTypes }, { data: workTypes }] = await Promise.all([
+    sb.from('projects').select('id, name').order('name'),
+    sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id'),
+    sb.from('biz_types').select('*').order('sort_order'),
+    sb.from('work_types').select('*').order('sort_order')
   ]);
+  bizTypesCache = bizTypes || [];
+  workTypesCache = workTypes || [];
   return {
     projects: (projs || []).map(p => p.name),
     projectsRaw: projs || [],
@@ -188,19 +198,27 @@ async function apiFetchMaster() {
   };
 }
 
-async function apiAddProject(name, bizType, workType) {
-  const { error } = await sb.from('projects').insert({
-    name, created_by: me?.id,
-    biz_type: bizType || 'other',
-    work_type: workType || 'other'
+async function apiFetchTemplates() {
+  const { data } = await sb.from('task_templates')
+    .select('*').eq('user_id', me.id).order('created_at', { ascending: false });
+  templatesCache = data || [];
+  return templatesCache;
+}
+
+async function apiSaveTemplate(tpl) {
+  const { error } = await sb.from('task_templates').insert({
+    user_id: me.id, name: tpl.name, project: tpl.project || null,
+    task: tpl.task || null, biz_type: tpl.biz_type || null, work_type: tpl.work_type || null
   });
   if (error) throw error;
 }
 
-async function apiUpdateProject(name, bizType, workType) {
-  const { error } = await sb.from('projects')
-    .update({ biz_type: bizType, work_type: workType })
-    .eq('name', name);
+async function apiDeleteTemplate(id) {
+  await sb.from('task_templates').delete().eq('id', id);
+}
+
+async function apiAddProject(name) {
+  const { error } = await sb.from('projects').insert({ name, created_by: me?.id });
   if (error) throw error;
 }
 
@@ -326,7 +344,7 @@ async function initApp() {
     paidVM = me.id;
 
     // マスタ・アカウント一括取得
-    const [mst, accts] = await Promise.all([apiFetchMaster(), apiFetchAccounts()]);
+    const [mst, accts] = await Promise.all([apiFetchMaster(), apiFetchAccounts(), apiFetchTemplates()]);
     master = mst;
     projectsCache = mst.projectsRaw || [];
     accounts = accts;
@@ -747,56 +765,83 @@ async function delAcct() {
 // ============================================================
 // マスタ
 // ============================================================
-const BIZ_LABELS = { direct:'直営', public:'公共', other:'その他' };
-const WORK_LABELS = { install:'導入', maintenance:'保守', other:'その他' };
-const BIZ_COLORS  = { direct:'#e6f1fb', public:'#eaf3de', other:'#f1efe8' };
-const WORK_COLORS = { install:'#faeeda', maintenance:'#eeedfe', other:'#f1efe8' };
-
 function renderMaster() {
   const raw = master.projectsRaw || [];
-  document.getElementById('proj-list').innerHTML = raw.map(p => {
-    const biz = p.biz_type || 'other';
-    const wrk = p.work_type || 'other';
-    return `<div style="display:flex;align-items:center;gap:5px;padding:4px 8px;border:0.5px solid rgba(0,0,0,.15);border-radius:8px;background:#f5f5f3;font-size:12px;margin-bottom:4px">
-      <span style="font-weight:500">${p.name}</span>
-      <span style="padding:1px 6px;border-radius:10px;font-size:10px;background:${BIZ_COLORS[biz]}">${BIZ_LABELS[biz]}</span>
-      <span style="padding:1px 6px;border-radius:10px;font-size:10px;background:${WORK_COLORS[wrk]}">${WORK_LABELS[wrk]}</span>
-      <span style="cursor:pointer;color:#aaa;font-size:11px;margin-left:2px" onclick="openEditProj('${p.name}','${biz}','${wrk}')"><i class="ti ti-edit"></i></span>
-      <span style="cursor:pointer;color:#aaa;font-size:13px" onclick="delProj('${p.name}')">×</span>
-    </div>`;
-  }).join('');
+  document.getElementById('proj-list').innerHTML = raw.map(p =>
+    `<div class="mtag">${p.name}<span class="x" onclick="delProj('${p.name}')">×</span></div>`
+  ).join('');
   document.getElementById('task-mlist').innerHTML = master.tasks.map((t,i) =>
     `<div class="mtag"><span style="color:var(--color-text-secondary);font-size:9px;margin-right:2px">${t.proj||''}</span>${t.name}<span class="x" onclick="delTaskM('${t.name}','${t.proj}')">×</span></div>`
   ).join('');
   document.getElementById('ntp').innerHTML = '<option value="">案件（任意）</option>' + master.projects.map(p => `<option value="${p}">${p}</option>`).join('');
+
+  // 事業区分マスタ
+  const bizEl = document.getElementById('biz-type-list');
+  if (bizEl) bizEl.innerHTML = bizTypesCache.map(b =>
+    `<div class="mtag">${b.name}<span class="x" onclick="delBizType(${b.id})">×</span></div>`
+  ).join('');
+
+  // 作業区分マスタ
+  const workEl = document.getElementById('work-type-list');
+  if (workEl) workEl.innerHTML = workTypesCache.map(w =>
+    `<div class="mtag">${w.name}<span class="x" onclick="delWorkType(${w.id})">×</span></div>`
+  ).join('');
+
+  // テンプレート一覧
+  renderTemplateList();
 }
 
-function openEditProj(name, bizType, workType) {
-  document.getElementById('ep-name').value = name;
-  document.getElementById('ep-biz').value = bizType;
-  document.getElementById('ep-work').value = workType;
-  document.getElementById('ep-title').textContent = name + ' の分類設定';
-  document.getElementById('m-editproj').style.display = 'flex';
+async function addBizType() {
+  const v = document.getElementById('new-biz-type').value.trim(); if(!v) return;
+  const { error } = await sb.from('biz_types').insert({ name: v, sort_order: 50 });
+  if (error) { showError(error.message); return; }
+  document.getElementById('new-biz-type').value = '';
+  const { data } = await sb.from('biz_types').select('*').order('sort_order');
+  bizTypesCache = data || []; renderMaster();
 }
 
-async function saveEditProj() {
-  const name = document.getElementById('ep-name').value;
-  const biz  = document.getElementById('ep-biz').value;
-  const work = document.getElementById('ep-work').value;
-  showLoading('保存中...');
-  try {
-    await apiUpdateProject(name, biz, work);
-    const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
-    hideLoading(); hm('m-editproj'); renderMaster();
-  } catch(e) { hideLoading(); showError(e.message); }
+async function delBizType(id) {
+  await sb.from('biz_types').delete().eq('id', id);
+  const { data } = await sb.from('biz_types').select('*').order('sort_order');
+  bizTypesCache = data || []; renderMaster();
+}
+
+async function addWorkType() {
+  const v = document.getElementById('new-work-type').value.trim(); if(!v) return;
+  const { error } = await sb.from('work_types').insert({ name: v, sort_order: 50 });
+  if (error) { showError(error.message); return; }
+  document.getElementById('new-work-type').value = '';
+  const { data } = await sb.from('work_types').select('*').order('sort_order');
+  workTypesCache = data || []; renderMaster();
+}
+
+async function delWorkType(id) {
+  await sb.from('work_types').delete().eq('id', id);
+  const { data } = await sb.from('work_types').select('*').order('sort_order');
+  workTypesCache = data || []; renderMaster();
+}
+
+function renderTemplateList() {
+  const el = document.getElementById('template-list');
+  if (!el) return;
+  el.innerHTML = templatesCache.map(t =>
+    `<div class="mtag" style="cursor:pointer" onclick="applyTemplate(${t.id})">
+      <i class="ti ti-template" style="font-size:11px;margin-right:3px" aria-hidden="true"></i>
+      ${t.name}
+      <span class="x" onclick="event.stopPropagation();deleteTemplate(${t.id})">×</span>
+    </div>`
+  ).join('') || '<div style="font-size:11px;color:#aaa">テンプレートなし</div>';
+}
+
+async function deleteTemplate(id) {
+  await apiDeleteTemplate(id);
+  await apiFetchTemplates(); renderMaster();
 }
 
 async function addProj() {
   const v = document.getElementById('np').value.trim(); if(!v) return;
-  const biz  = document.getElementById('np-biz').value;
-  const work = document.getElementById('np-work').value;
   try {
-    await apiAddProject(v, biz, work);
+    await apiAddProject(v);
     const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
     document.getElementById('np').value=''; renderMaster();
   }
@@ -869,10 +914,102 @@ function openTM(k, uid) {
   const today = new Date();
   document.getElementById('mt-t').textContent = k ? `${k}（${gA(uid)?.name||uid}）工数` : '工数入力';
   document.getElementById('mt-d').value = k || dk(today.getFullYear(), today.getMonth()+1, today.getDate());
-  const ps = document.getElementById('ta-proj');
-  ps.innerHTML = '<option value="">案件</option>' + master.projects.map(p => `<option value="${p}">${p}</option>`).join('');
-  updTS(); renderTEL(k); document.getElementById('nh-val').textContent = newH;
+  document.getElementById('ta-proj-input').value = '';
+  hideProjSuggest();
+  document.getElementById('ta-biz').innerHTML =
+    '<option value="">事業区分</option>' + bizTypesCache.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
+  document.getElementById('ta-work').innerHTML =
+    '<option value="">作業区分</option>' + workTypesCache.map(w => `<option value="${w.name}">${w.name}</option>`).join('');
+  updTS('');
+  renderTEL(k);
+  renderTplBtns();
+  document.getElementById('nh-val').textContent = newH;
+  document.getElementById('tpl-save-name').value = '';
   document.getElementById('mt').style.display = 'flex';
+}
+
+function renderTplBtns() {
+  const el = document.getElementById('tpl-btn-list');
+  if (!el) return;
+  if (!templatesCache.length) {
+    el.innerHTML = '<span style="font-size:11px;color:#aaa">テンプレートなし（下で保存できます）</span>';
+    return;
+  }
+  el.innerHTML = templatesCache.map(t =>
+    `<button class="btn btn-sm" onclick="applyTemplate(${t.id})" style="font-size:11px;padding:3px 9px">
+      <i class="ti ti-template" style="font-size:11px" aria-hidden="true"></i> ${t.name}
+    </button>`
+  ).join('');
+}
+
+function applyTemplate(id) {
+  const tpl = templatesCache.find(t => t.id === id);
+  if (!tpl) return;
+  if (tpl.project) { document.getElementById('ta-proj-input').value = tpl.project; updTS(tpl.project); }
+  if (tpl.biz_type) document.getElementById('ta-biz').value = tpl.biz_type;
+  if (tpl.work_type) document.getElementById('ta-work').value = tpl.work_type;
+  if (tpl.task) setTimeout(() => { document.getElementById('ta-task').value = tpl.task; }, 50);
+}
+
+async function saveCurrentAsTemplate() {
+  const name = document.getElementById('tpl-save-name').value.trim();
+  if (!name) { showError('テンプレート名を入力してください'); return; }
+  const proj = document.getElementById('ta-proj-input').value.trim();
+  const task = document.getElementById('ta-task').value;
+  const biz  = document.getElementById('ta-biz').value;
+  const work = document.getElementById('ta-work').value;
+  try {
+    await apiSaveTemplate({ name, project: proj||null, task: task||null, biz_type: biz||null, work_type: work||null });
+    await apiFetchTemplates();
+    renderTplBtns(); renderTemplateList();
+    document.getElementById('tpl-save-name').value = '';
+  } catch(e) { showError(e.message); }
+}
+
+function filterProjSuggest() {
+  const q = document.getElementById('ta-proj-input').value.trim().toLowerCase();
+  const el = document.getElementById('proj-suggest');
+  const recent = Object.values(gT(tmUID)).flat().map(e => e.proj).filter(Boolean);
+  const recentSet = [...new Set(recent)].slice(0, 5);
+  let candidates = master.projects;
+  if (q) candidates = candidates.filter(p => p.toLowerCase().includes(q));
+  const sorted = [
+    ...recentSet.filter(p => candidates.includes(p)),
+    ...candidates.filter(p => !recentSet.includes(p))
+  ];
+  if (!sorted.length && !q) { el.style.display = 'none'; return; }
+  let html = sorted.map(p =>
+    `<div onclick="selectProj('${p.replace(/'/g,"\'")}')"
+      style="padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,.06)"
+      onmouseover="this.style.background='#f5f5f3'" onmouseout="this.style.background=''">${p}</div>`
+  ).join('');
+  if (q && !master.projects.some(p => p.toLowerCase() === q)) {
+    html += `<div onclick="addProjAndSelect('${q.replace(/'/g,"\'")}')"
+      style="padding:6px 10px;font-size:12px;cursor:pointer;color:#185fa5;background:#e6f1fb">
+      <i class="ti ti-plus" aria-hidden="true"></i> 「${q}」を新規登録して選択
+    </div>`;
+  }
+  el.innerHTML = html;
+  el.style.display = 'block';
+}
+
+function selectProj(name) {
+  document.getElementById('ta-proj-input').value = name;
+  hideProjSuggest();
+  updTS(name);
+}
+
+function hideProjSuggest() {
+  const el = document.getElementById('proj-suggest');
+  if (el) el.style.display = 'none';
+}
+
+async function addProjAndSelect(name) {
+  try {
+    await apiAddProject(name);
+    const m = await apiFetchMaster(); master = m; projectsCache = m.projectsRaw || [];
+    selectProj(name);
+  } catch(e) { showError(e.message); }
 }
 
 function renderTEL(k) {
@@ -880,14 +1017,16 @@ function renderTEL(k) {
   const te = gT(tmUID)[k2] || [];
   const tot = te.reduce((s,t) => s+t.h, 0);
   let h = te.map((t,i) =>
-    `<div style="display:flex;align-items:center;gap:4px;padding:4px 3px;border-bottom:0.5px solid var(--color-border-tertiary);font-size:11px">
-      <span class="cbadge bw">${t.proj}</span>
-      <span style="flex:1;color:var(--color-text-secondary)">${t.task}</span>
+    `<div style="display:flex;align-items:center;gap:4px;padding:5px 4px;border-bottom:0.5px solid rgba(0,0,0,.06);font-size:11px">
+      <span style="padding:1px 5px;border-radius:3px;background:#e6f1fb;color:#0c447c;font-size:9px;white-space:nowrap">${t.proj}</span>
+      <span style="flex:1;color:#888">${t.task}</span>
+      ${t.biz_type ? `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#eaf3de;color:#3b6d11">${t.biz_type}</span>` : ''}
+      ${t.work_type ? `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#faeeda;color:#854f0b">${t.work_type}</span>` : ''}
       <div class="hs"><button onclick="adjTE(${i},-0.5)">−</button><span>${t.h}H</span><button onclick="adjTE(${i},0.5)">＋</button></div>
-      <span style="cursor:pointer;color:var(--color-text-tertiary)" onclick="delTE(${i})"><i class="ti ti-trash"></i></span>
+      <span style="cursor:pointer;color:#aaa" onclick="delTE(${i})"><i class="ti ti-trash"></i></span>
     </div>`
   ).join('');
-  if(!h) h='<div style="color:var(--color-text-secondary);font-size:11px;padding:5px">タスクを追加してください</div>';
+  if (!h) h = '<div style="color:#aaa;font-size:11px;padding:8px 4px">エントリーを追加してください</div>';
   document.getElementById('tel').innerHTML = h;
   document.getElementById('mt-tot').textContent = tot;
 }
@@ -898,29 +1037,53 @@ function adjTE(i, d) {
   gT(tmUID)[k][i].h = Math.max(0.5, gT(tmUID)[k][i].h + d);
   renderTEL(k);
 }
+
 function delTE(i) {
   const k = document.getElementById('mt-d').value;
   if (gT(tmUID)[k]) gT(tmUID)[k].splice(i, 1);
   renderTEL(k);
 }
-function updTS() {
-  const proj = document.getElementById('ta-proj').value;
-  const ts = proj ? master.tasks.filter(t => !t.proj || t.proj === proj) : master.tasks;
-  document.getElementById('ta-task').innerHTML = '<option value="">タスク</option>' + ts.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+
+function updTS(projName) {
+  const ts = projName
+    ? master.tasks.filter(t => !t.proj || t.proj === projName)
+    : master.tasks;
+  document.getElementById('ta-task').innerHTML =
+    '<option value="">タスク</option>' + ts.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
 }
+
 function adjNH(d) { newH = Math.max(0.5, newH + d); document.getElementById('nh-val').textContent = newH; }
+
 function addTE() {
-  const proj=document.getElementById('ta-proj').value, task=document.getElementById('ta-task').value;
-  if(!proj||!task) return;
-  const k=document.getElementById('mt-d').value; if(!k) return;
-  if(!gT(tmUID)[k]) gT(tmUID)[k]=[];
-  const ex=gT(tmUID)[k].find(t=>t.proj===proj&&t.task===task);
-  if(ex) ex.h+=newH; else gT(tmUID)[k].push({proj,task,h:newH});
+  const proj = document.getElementById('ta-proj-input').value.trim();
+  const task = document.getElementById('ta-task').value;
+  const biz  = document.getElementById('ta-biz').value;
+  const work = document.getElementById('ta-work').value;
+  if (!proj || !task) { showError('案件とタスクを入力してください'); return; }
+  const k = document.getElementById('mt-d').value; if (!k) return;
+  if (!gT(tmUID)[k]) gT(tmUID)[k] = [];
+  const ex = gT(tmUID)[k].find(t => t.proj===proj && t.task===task && t.biz_type===biz && t.work_type===work);
+  if (ex) ex.h += newH;
+  else gT(tmUID)[k].push({ proj, task, h: newH, biz_type: biz||null, work_type: work||null });
   renderTEL(k);
 }
 
+function duplicateLastEntry() {
+  const k = document.getElementById('mt-d').value;
+  const entries = gT(tmUID)[k] || [];
+  if (!entries.length) { showError('複製するエントリーがありません'); return; }
+  const last = entries[entries.length - 1];
+  document.getElementById('ta-proj-input').value = last.proj;
+  updTS(last.proj);
+  setTimeout(() => {
+    document.getElementById('ta-task').value = last.task;
+    if (last.biz_type) document.getElementById('ta-biz').value = last.biz_type;
+    if (last.work_type) document.getElementById('ta-work').value = last.work_type;
+  }, 50);
+}
+
 async function saveT() {
-  const k = document.getElementById('mt-d').value; if(!k) return;
+  const k = document.getElementById('mt-d').value; if (!k) return;
   const entries = gT(tmUID)[k] || [];
   showLoading('保存中...');
   try {
@@ -1550,25 +1713,50 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 
   <!-- Master -->
   <div id="sec-master" class="section">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:1.25rem">
+      <!-- 事業区分マスタ -->
+      <div class="msec">
+        <h3>事業区分マスタ</h3>
+        <div class="mlist" id="biz-type-list"></div>
+        <div class="ar">
+          <input type="text" id="new-biz-type" placeholder="区分名..." style="max-width:160px">
+          <button class="btn btn-sm" onclick="addBizType()"><i class="ti ti-plus"></i></button>
+        </div>
+      </div>
+      <!-- 作業区分マスタ -->
+      <div class="msec">
+        <h3>作業区分マスタ</h3>
+        <div class="mlist" id="work-type-list"></div>
+        <div class="ar">
+          <input type="text" id="new-work-type" placeholder="区分名..." style="max-width:160px">
+          <button class="btn btn-sm" onclick="addWorkType()"><i class="ti ti-plus"></i></button>
+        </div>
+      </div>
+    </div>
+    <!-- 案件マスタ -->
     <div class="msec">
       <h3>案件マスタ</h3>
-      <div id="proj-list" style="margin-bottom:.625rem"></div>
-      <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center">
-        <input type="text" id="np" placeholder="案件名..." style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;width:160px">
-        <select id="np-biz" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px;background:#fff">
-          <option value="other">事業区分：その他</option>
-          <option value="direct">直営</option>
-          <option value="public">公共</option>
-        </select>
-        <select id="np-work" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px;background:#fff">
-          <option value="other">作業区分：その他</option>
-          <option value="install">導入</option>
-          <option value="maintenance">保守</option>
-        </select>
+      <div id="proj-list" style="margin-bottom:.625rem;display:flex;flex-wrap:wrap;gap:4px"></div>
+      <div class="ar">
+        <input type="text" id="np" placeholder="案件名..." style="max-width:200px">
         <button class="btn btn-sm" onclick="addProj()"><i class="ti ti-plus"></i> 追加</button>
       </div>
     </div>
-    <div class="msec"><h3>タスクマスタ</h3><div class="mlist" id="task-mlist"></div><div class="ar"><select id="ntp" style="width:130px"><option value="">案件</option></select><input type="text" id="ntn" placeholder="タスク名..." style="max-width:150px"><button class="btn btn-sm" onclick="addTaskM()"><i class="ti ti-plus"></i></button></div></div>
+    <!-- タスクマスタ -->
+    <div class="msec">
+      <h3>タスクマスタ</h3>
+      <div class="mlist" id="task-mlist"></div>
+      <div class="ar">
+        <select id="ntp" style="width:130px"><option value="">案件</option></select>
+        <input type="text" id="ntn" placeholder="タスク名..." style="max-width:150px">
+        <button class="btn btn-sm" onclick="addTaskM()"><i class="ti ti-plus"></i></button>
+      </div>
+    </div>
+    <!-- テンプレートマスタ -->
+    <div class="msec">
+      <h3>工数テンプレート（自分のみ）</h3>
+      <div id="template-list" style="display:flex;flex-wrap:wrap;gap:4px"></div>
+    </div>
   </div>
 </div>
 </div>
@@ -1613,33 +1801,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <div class="fr"><label>取得日数</label><select id="mp-days"><option value="1">1日</option><option value="0.5">0.5日（半休）</option></select></div>
   <div class="fr"><label>付与年度</label><select id="mp-yr"></select></div>
   <div class="mbtns"><button class="btn" onclick="hm('mp')">キャンセル</button><button class="btn btn-p" onclick="savePaid()">保存</button></div>
-</div></div>
-
-<!-- Project Edit Modal -->
-<div id="m-editproj" class="mo" style="display:none" onclick="if(event.target===this)hm('m-editproj')">
-<div class="mc" onclick="event.stopPropagation()" style="max-width:360px">
-  <h3 id="ep-title">案件の分類設定</h3>
-  <input type="hidden" id="ep-name">
-  <div class="fr">
-    <label>事業区分</label>
-    <select id="ep-biz">
-      <option value="direct">直営</option>
-      <option value="public">公共</option>
-      <option value="other">その他</option>
-    </select>
-  </div>
-  <div class="fr">
-    <label>作業区分</label>
-    <select id="ep-work">
-      <option value="install">導入</option>
-      <option value="maintenance">保守</option>
-      <option value="other">その他</option>
-    </select>
-  </div>
-  <div class="mbtns">
-    <button class="btn" onclick="hm('m-editproj')">キャンセル</button>
-    <button class="btn btn-p" onclick="saveEditProj()">保存</button>
-  </div>
 </div></div>
 
 <!-- Account Modal -->
