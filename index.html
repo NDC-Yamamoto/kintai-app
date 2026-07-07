@@ -1,0 +1,1191 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>勤怠・工数管理</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<style>
+/* ============================================================
+   設定：ここを書き換えてください
+   ============================================================ */
+</style>
+</head>
+<body>
+<script>
+// ============================================================
+// ★ ここを書き換えてください（STEP 3 で取得した値）
+// ============================================================
+const SUPABASE_URL = 'https://tgdkytuiwxezovjazqbx.supabase.co';
+const SUPABASE_ANON_KEY = '2ceb08a3-09dc-408e-8c27-a48c1a9c4a2d';
+// ============================================================
+
+const { createClient } = supabase;
+const sb = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+// ============================================================
+// グローバル状態
+// ============================================================
+let me = null;          // 現在のログインユーザー（accountsレコード）
+let authUser = null;    // Supabase auth ユーザー
+let curY, curM;
+let projectsCache = [];
+let tasksMasterCache = [];
+
+// ============================================================
+// Supabase API ラッパー
+// ── localStorage 版から差し替えるのはこのセクションだけ ──
+// ============================================================
+
+/** 認証 **/
+async function apiLogin(email, password) {
+  const { data, error } = await sb.auth.signInWithPassword({ email, password });
+  if (error) throw error;
+  return data.user;
+}
+
+async function apiLogout() {
+  await sb.auth.signOut();
+}
+
+async function apiGetMe() {
+  const { data: { user } } = await sb.auth.getUser();
+  if (!user) return null;
+  authUser = user;
+  const { data } = await sb.from('accounts').select('*, sub_admin_scope!sub_admin_id(target_id)').eq('auth_uid', user.id).single();
+  if (!data) return null;
+  data.scope = (data.sub_admin_scope || []).map(s => s.target_id);
+  return data;
+}
+
+/** アカウント管理 **/
+async function apiFetchAccounts() {
+  const { data } = await sb.from('accounts').select('*, sub_admin_scope!sub_admin_id(target_id)').order('created_at');
+  return (data || []).map(a => ({ ...a, scope: (a.sub_admin_scope || []).map(s => s.target_id) }));
+}
+
+async function apiCreateAccount({ id, name, email, password, role, scope }) {
+  // 1. Supabase Auth にユーザー作成（管理者権限が必要 → Service Role Key が必要）
+  // ※ セキュリティのため、本番では Edge Function 経由で行う
+  // ここでは Auth Admin API を使う代わりに、手順書通りダッシュボードで作成してもらう
+  // 開発・デモ用として signUp を使用（確認メールOFF推奨）
+  const { data: authData, error: authError } = await sb.auth.signUp({ email, password });
+  if (authError) throw authError;
+  const { error } = await sb.from('accounts').insert({ id, auth_uid: authData.user.id, name, role });
+  if (error) throw error;
+  if (role === 'sub' && scope.length) {
+    await sb.from('sub_admin_scope').insert(scope.map(t => ({ sub_admin_id: id, target_id: t })));
+  }
+}
+
+async function apiUpdateAccount({ id, name, role, scope }) {
+  const { error } = await sb.from('accounts').update({ name, role }).eq('id', id);
+  if (error) throw error;
+  await sb.from('sub_admin_scope').delete().eq('sub_admin_id', id);
+  if (role === 'sub' && scope.length) {
+    await sb.from('sub_admin_scope').insert(scope.map(t => ({ sub_admin_id: id, target_id: t })));
+  }
+}
+
+async function apiDeleteAccount(id) {
+  await sb.from('accounts').delete().eq('id', id);
+}
+
+/** 勤怠 **/
+async function apiFetchKintai(userId, year, month) {
+  const from = `${year}-${String(month).padStart(2,'0')}-01`;
+  const to   = `${year}-${String(month).padStart(2,'0')}-31`;
+  const { data } = await sb.from('kintai_records')
+    .select('*').eq('user_id', userId).gte('date', from).lte('date', to);
+  // { 'YYYY-MM-DD': record } の形に変換
+  const map = {};
+  (data || []).forEach(r => {
+    map[r.date] = {
+      id: r.id,
+      type: r.type,
+      start: r.start_time ? r.start_time.slice(0,5) : '',
+      end: r.end_time ? r.end_time.slice(0,5) : '',
+      breakMin: r.break_min,
+      remote: r.is_remote
+    };
+  });
+  return map;
+}
+
+async function apiSaveKintai(userId, date, entry) {
+  const record = {
+    user_id: userId,
+    date,
+    type: entry.type,
+    start_time: entry.start || null,
+    end_time: entry.end || null,
+    break_min: entry.breakMin || 60,
+    is_remote: !!entry.remote
+  };
+  const { error } = await sb.from('kintai_records').upsert(record, { onConflict: 'user_id,date' });
+  if (error) throw error;
+}
+
+async function apiDeleteKintai(userId, date) {
+  await sb.from('kintai_records').delete().eq('user_id', userId).eq('date', date);
+}
+
+/** 工数 **/
+async function apiFetchTasks(userId, year, month) {
+  const from = `${year}-${String(month).padStart(2,'0')}-01`;
+  const to   = `${year}-${String(month).padStart(2,'0')}-31`;
+  const { data } = await sb.from('task_entries')
+    .select('*').eq('user_id', userId).gte('date', from).lte('date', to).order('date');
+  // { 'YYYY-MM-DD': [{proj,task,h,id}] } の形に変換
+  const map = {};
+  (data || []).forEach(r => {
+    if (!map[r.date]) map[r.date] = [];
+    map[r.date].push({ id: r.id, proj: r.project, task: r.task, h: parseFloat(r.hours) });
+  });
+  return map;
+}
+
+async function apiSaveTaskEntries(userId, date, entries) {
+  // 既存削除 → 全件INSERT
+  await sb.from('task_entries').delete().eq('user_id', userId).eq('date', date);
+  if (entries.length) {
+    const rows = entries.map(e => ({ user_id: userId, date, project: e.proj, task: e.task, hours: e.h }));
+    const { error } = await sb.from('task_entries').insert(rows);
+    if (error) throw error;
+  }
+}
+
+/** 有給 **/
+async function apiFetchPaid(userId) {
+  const { data: grants } = await sb.from('paid_grants').select('*, paid_usages(*)').eq('user_id', userId).order('grant_date');
+  return (grants || []).map(g => ({
+    id: g.id,
+    year: g.year_label,
+    grantDate: g.grant_date,
+    prev: parseFloat(g.prev_days),
+    granted: parseFloat(g.granted_days),
+    entries: (g.paid_usages || []).map(u => ({ id: u.id, date: u.date, days: parseFloat(u.days) }))
+  }));
+}
+
+async function apiAddPaidUsage(grantId, userId, date, days) {
+  const { error } = await sb.from('paid_usages').insert({ grant_id: grantId, user_id: userId, date, days });
+  if (error) throw error;
+}
+
+/** マスタ **/
+async function apiFetchMaster() {
+  const [{ data: projs }, { data: tasks }] = await Promise.all([
+    sb.from('projects').select('id, name').order('id'),
+    sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id')
+  ]);
+  return {
+    projects: (projs || []).map(p => p.name),
+    projectsRaw: projs || [],
+    tasks: (tasks || []).map(t => ({ proj: t.projects?.name || '', name: t.name }))
+  };
+}
+
+async function apiAddProject(name) {
+  const { error } = await sb.from('projects').insert({ name, created_by: me?.id });
+  if (error) throw error;
+}
+
+async function apiDeleteProject(name) {
+  await sb.from('projects').delete().eq('name', name);
+}
+
+async function apiAddTask(projName, taskName) {
+  const proj = projectsCache.find(p => p.name === projName);
+  const { error } = await sb.from('tasks_master').insert({ project_id: proj?.id || null, name: taskName });
+  if (error) throw error;
+}
+
+async function apiDeleteTask(taskName, projName) {
+  const proj = projectsCache.find(p => p.name === projName);
+  let q = sb.from('tasks_master').delete().eq('name', taskName);
+  if (proj) q = q.eq('project_id', proj.id);
+  await q;
+}
+
+// ============================================================
+// UI 状態
+// ============================================================
+let accounts = [];
+let kintaiCache = {};   // { userId: { 'YYYY-MM-DD': entry } }
+let tasksCache = {};    // { userId: { 'YYYY-MM-DD': [entries] } }
+let paidCache = {};     // { userId: [grants] }
+let master = { projects: [], tasks: [] };
+let paidVM = null;
+
+// モーダル用の一時データ
+let editKKey = null, kmUID = null;
+let editTKey = null, tmUID = null;
+let editAcctId = null;
+let newH = 0.5;
+
+// ============================================================
+// ヘルパー
+// ============================================================
+const DAY = ['日','月','火','水','木','金','土'];
+const TL = { work:'出勤', paid:'有給', half:'半休', holiday:'祝日', remote:'在宅' };
+const TB = { work:'bw', paid:'bp', half:'bh', holiday:'bho', remote:'br' };
+
+function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
+function pT(t) { if(!t) return null; const [h,m]=t.split(':').map(Number); return h+m/60; }
+function fH(h) { if(!h) return '0:00'; const hh=Math.floor(h), mm=Math.round((h-hh)*60); return `${hh}:${String(mm).padStart(2,'0')}`; }
+function cW(e) { if(!e||!e.start||!e.end) return 0; return Math.max(0, pT(e.end)-pT(e.start)-(e.breakMin||60)/60); }
+function gA(id) { return accounts.find(a => a.id === id); }
+function isAdmin() { return me && me.role === 'admin'; }
+function isSub() { return me && me.role === 'sub'; }
+function canView(uid) {
+  if (!me) return false;
+  if (me.role === 'admin') return true;
+  if (me.role === 'sub') return (me.scope||[]).includes(uid) || me.id === uid;
+  return me.id === uid;
+}
+function canEdit(uid) { return me && (me.role === 'admin' || me.id === uid); }
+function vMembers() { return accounts.filter(a => canView(a.id)); }
+
+function gK(uid) {
+  if (!kintaiCache[uid]) kintaiCache[uid] = {};
+  return kintaiCache[uid];
+}
+function gT(uid) {
+  if (!tasksCache[uid]) tasksCache[uid] = {};
+  return tasksCache[uid];
+}
+function tH(uid, k) { return (gT(uid)[k] || []).reduce((s,t) => s+t.h, 0); }
+
+// ============================================================
+// ローディング表示
+// ============================================================
+function showLoading(msg = '読み込み中...') {
+  document.getElementById('loading-overlay').style.display = 'flex';
+  document.getElementById('loading-msg').textContent = msg;
+}
+function hideLoading() {
+  document.getElementById('loading-overlay').style.display = 'none';
+}
+function showError(msg) {
+  const el = document.getElementById('global-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+  setTimeout(() => el.style.display = 'none', 4000);
+}
+
+// ============================================================
+// 認証フロー
+// ============================================================
+async function doLogin() {
+  const email = document.getElementById('li-email').value.trim();
+  const pw = document.getElementById('li-pw').value;
+  document.getElementById('li-err').textContent = '';
+  try {
+    showLoading('ログイン中...');
+    await apiLogin(email, pw);
+    me = await apiGetMe();
+    if (!me) throw new Error('アカウント情報が見つかりません。管理者に確認してください。');
+    hideLoading();
+    await initApp();
+  } catch(e) {
+    hideLoading();
+    document.getElementById('li-err').textContent = e.message || 'ログインに失敗しました';
+  }
+}
+
+async function doLogout() {
+  await apiLogout();
+  me = null; authUser = null;
+  kintaiCache = {}; tasksCache = {}; paidCache = {};
+  document.getElementById('pg-app').style.display = 'none';
+  document.getElementById('pg-login').style.display = 'flex';
+}
+
+// ============================================================
+// アプリ初期化
+// ============================================================
+async function initApp() {
+  showLoading('データを読み込み中...');
+  try {
+    const now = new Date();
+    curY = now.getFullYear(); curM = now.getMonth() + 1;
+    paidVM = me.id;
+
+    // マスタ・アカウント一括取得
+    const [mst, accts] = await Promise.all([apiFetchMaster(), apiFetchAccounts()]);
+    master = mst;
+    projectsCache = mst.projectsRaw || [];
+    accounts = accts;
+
+    // 今月の自分のデータ取得
+    const [kin, tsk] = await Promise.all([
+      apiFetchKintai(me.id, curY, curM),
+      apiFetchTasks(me.id, curY, curM)
+    ]);
+    kintaiCache[me.id] = kin;
+    tasksCache[me.id] = tsk;
+
+    hideLoading();
+    document.getElementById('pg-login').style.display = 'none';
+    document.getElementById('pg-app').style.display = 'block';
+    document.getElementById('login-name').textContent = me.name;
+
+    const rb = document.getElementById('role-badge');
+    const roles = { admin: ['管理者','ba'], sub: ['準管理者','bs'], member: ['一般','bm'] };
+    const [rl, rc] = roles[me.role] || ['一般','bm'];
+    rb.textContent = rl; rb.className = `badge ${rc}`;
+
+    buildTabs();
+    initVSels();
+    showTab('dashboard');
+  } catch(e) {
+    hideLoading();
+    showError('初期化エラー: ' + e.message);
+  }
+}
+
+// ============================================================
+// タブ・ナビゲーション
+// ============================================================
+function buildTabs() {
+  const tabs = [
+    { id:'dashboard', icon:'ti-layout-dashboard', label:'ダッシュボード', show:true },
+    { id:'calendar',  icon:'ti-calendar',          label:'カレンダー',     show:true },
+    { id:'list',      icon:'ti-table',             label:'集計',           show:true },
+    { id:'workload',  icon:'ti-chart-bar',          label:'工数',           show:true },
+    { id:'paid',      icon:'ti-leaf',              label:'有給',           show:true },
+    { id:'admin',     icon:'ti-users',             label:'チーム',         show:isAdmin()||isSub() },
+    { id:'accounts',  icon:'ti-user-cog',          label:'アカウント',     show:isAdmin() },
+    { id:'master',    icon:'ti-settings',          label:'案件設定',       show:isAdmin() },
+  ];
+  document.getElementById('tab-bar').innerHTML = tabs.filter(t=>t.show).map(t =>
+    `<button class="tab" id="tab-${t.id}" onclick="showTab('${t.id}')"><i class="ti ${t.icon}" aria-hidden="true"></i> ${t.label}</button>`
+  ).join('');
+}
+
+function initVSels() {
+  const vm = vMembers();
+  const opts = vm.map(m => `<option value="${m.id}">${m.name}</option>`).join('');
+  ['cal-vsel','list-vsel','wl-vsel'].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = opts; el.value = me.id;
+    el.style.display = vm.length > 1 ? '' : 'none';
+  });
+  const pv = document.getElementById('paid-vsel');
+  if (pv) { pv.innerHTML = opts; pv.value = paidVM || me.id; pv.style.display = vm.length > 1 ? '' : 'none'; }
+}
+
+function showTab(id) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  const tb = document.getElementById('tab-' + id);
+  if (tb) tb.classList.add('active');
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+  const sec = document.getElementById('sec-' + id);
+  if (sec) sec.classList.add('active');
+  const renderers = {
+    dashboard: renderDashboard,
+    calendar:  renderCalendar,
+    list:      renderList,
+    workload:  renderWorkload,
+    paid:      renderPaid,
+    admin:     renderAdmin,
+    accounts:  renderAccounts,
+    master:    renderMaster,
+  };
+  if (renderers[id]) renderers[id]();
+}
+
+async function cm(d) {
+  curM += d;
+  if (curM > 12) { curM = 1; curY++; }
+  if (curM < 1)  { curM = 12; curY--; }
+  // 表示中のメンバーのデータを再取得
+  const uid = getCurrentViewUID();
+  showLoading('データ取得中...');
+  try {
+    const [kin, tsk] = await Promise.all([
+      apiFetchKintai(uid, curY, curM),
+      apiFetchTasks(uid, curY, curM)
+    ]);
+    kintaiCache[uid] = kin;
+    tasksCache[uid] = tsk;
+  } catch(e) { showError(e.message); }
+  hideLoading();
+  const a = document.querySelector('.section.active');
+  if (a) showTab(a.id.replace('sec-',''));
+}
+
+function getCurrentViewUID() {
+  const sels = ['cal-vsel','list-vsel','wl-vsel'];
+  for (const id of sels) {
+    const el = document.getElementById(id);
+    if (el && el.closest('.section.active')) return el.value;
+  }
+  return me.id;
+}
+
+async function switchViewMember(selId) {
+  const uid = document.getElementById(selId).value;
+  showLoading('データ取得中...');
+  try {
+    const [kin, tsk] = await Promise.all([
+      apiFetchKintai(uid, curY, curM),
+      apiFetchTasks(uid, curY, curM)
+    ]);
+    kintaiCache[uid] = kin; tasksCache[uid] = tsk;
+  } catch(e) { showError(e.message); }
+  hideLoading();
+  const a = document.querySelector('.section.active');
+  if (a) showTab(a.id.replace('sec-',''));
+}
+
+// ============================================================
+// ダッシュボード
+// ============================================================
+function renderDashboard() {
+  const uid = me.id;
+  const now = new Date(); const y = now.getFullYear(), m = now.getMonth() + 1;
+  const dim = new Date(y, m, 0).getDate();
+  const md = gK(uid), mt = gT(uid);
+  let wd=0, totalH=0, pd=0, tkH=0;
+  const pmap = {};
+  for (let d=1; d<=dim; d++) {
+    const k = dk(y,m,d); const e = md[k]; const te = mt[k] || [];
+    if (e && (e.type==='work'||e.type==='remote')) { wd++; totalH += cW(e); }
+    if (e && e.type==='paid') pd++;
+    if (e && e.type==='half') pd += 0.5;
+    te.forEach(t => { tkH += t.h; if (!pmap[t.proj]) pmap[t.proj]=0; pmap[t.proj]+=t.h; });
+  }
+  const hr = now.getHours();
+  document.getElementById('dash-greeting').textContent =
+    `${hr<12?'おはようございます':'こんにちは'}、${me.name}さん　${y}年${m}月`;
+  document.getElementById('dash-grid').innerHTML = `
+    <div class="dcard"><div class="dcard-label"><i class="ti ti-calendar-check" aria-hidden="true"></i>稼働日数</div><div class="dcard-val">${wd}<span class="dcard-unit"> 日</span></div></div>
+    <div class="dcard"><div class="dcard-label"><i class="ti ti-clock" aria-hidden="true"></i>総稼働時間</div><div class="dcard-val" style="font-size:18px">${fH(totalH)}</div></div>
+    <div class="dcard"><div class="dcard-label"><i class="ti ti-briefcase" aria-hidden="true"></i>工数合計</div><div class="dcard-val">${tkH}<span class="dcard-unit"> H</span></div></div>
+  `;
+  const projs = Object.keys(pmap).sort((a,b) => pmap[b]-pmap[a]);
+  const maxH = projs.length ? pmap[projs[0]] : 1;
+  document.getElementById('dash-proj-bars').innerHTML = projs.map(p =>
+    `<div style="margin-bottom:5px">
+      <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:2px"><span>${p}</span><span>${pmap[p]}H</span></div>
+      <div style="background:var(--color-background-secondary);border-radius:3px;height:6px;overflow:hidden"><div style="width:${Math.round(pmap[p]/maxH*100)}%;height:100%;background:#378ADD;border-radius:3px"></div></div>
+    </div>`
+  ).join('') || '<div style="font-size:11px;color:var(--color-text-secondary)">工数データなし</div>';
+  const allDays = [];
+  for (let d=dim; d>=1; d--) { const k=dk(y,m,d); if(md[k]) allDays.push({k,e:md[k]}); if(allDays.length>=5) break; }
+  document.getElementById('dash-recent').innerHTML = allDays.map(({k,e}) => {
+    const dd=parseInt(k.split('-')[2]); const wd2=new Date(y,m-1,dd).getDay();
+    return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:0.5px solid var(--color-border-tertiary);font-size:11px">
+      <span>${m}/${dd}(${DAY[wd2]}) <span class="cbadge ${TB[e.type]}">${TL[e.type]}</span></span>
+      <span style="color:var(--color-text-secondary)">${e.start&&e.end?e.start+'〜'+e.end:'—'}</span>
+    </div>`;
+  }).join('') || '<div style="font-size:11px;color:var(--color-text-secondary)">記録なし</div>';
+}
+
+// ============================================================
+// カレンダー
+// ============================================================
+function renderCalendar() {
+  const uid = document.getElementById('cal-vsel')?.value || me.id;
+  document.getElementById('mt1').textContent = `${curY}年${curM}月`;
+  const first=new Date(curY,curM-1,1).getDay(), dim=new Date(curY,curM,0).getDate();
+  const today=new Date(), todayK=dk(today.getFullYear(),today.getMonth()+1,today.getDate());
+  const md=gK(uid), mt=gT(uid);
+  let cells=[];
+  for(let i=0;i<first;i++) cells.push(null);
+  for(let d=1;d<=dim;d++) cells.push({d, k:dk(curY,curM,d), wd:(first+d-1)%7, isT:dk(curY,curM,d)===todayK});
+  while(cells.length%7) cells.push(null);
+  const ed = canEdit(uid);
+  let rows='';
+  for(let i=0;i<cells.length;i+=7) {
+    rows += '<tr>';
+    for(let j=0;j<7;j++) {
+      const c=cells[i+j];
+      if(!c) { rows+='<td style="background:var(--color-background-secondary)"></td>'; continue; }
+      const e=md[c.k]; const te=mt[c.k]||[]; const th=te.reduce((s,t)=>s+t.h,0);
+      const dc=c.isT?'cal-today':`cal-date${c.wd===0?' sun':c.wd===6?' sat':''}`;
+      let cnt='';
+      if(e) { cnt+=`<span class="cbadge ${TB[e.type]}">${TL[e.type]}</span>`; if(e.start&&e.end) cnt+=`<br><span style="font-size:9px;color:var(--color-text-secondary)">${e.start}〜${e.end}</span>`; }
+      if(th>0) cnt+=`<br><span style="font-size:9px;color:#185FA5;font-weight:500">${th}H</span>`;
+      rows += `<td class="${ed?'clickable':''}" ${ed?`onclick="openKM('${c.k}','${uid}')"`:''}><div class="${dc}">${c.d}</div>${cnt}</td>`;
+    }
+    rows += '</tr>';
+  }
+  document.getElementById('cal-body').innerHTML = rows;
+}
+
+// ============================================================
+// 集計
+// ============================================================
+function renderList() {
+  const uid = document.getElementById('list-vsel')?.value || me.id;
+  document.getElementById('mt2').textContent = `${curY}年${curM}月`;
+  const dim=new Date(curY,curM,0).getDate();
+  const md=gK(uid), mt=gT(uid);
+  let wd=0, th=0, pd=0, tkh=0; let rows='';
+  for(let d=1;d<=dim;d++) {
+    const k=dk(curY,curM,d); const e=md[k]; const te=mt[k]||[];
+    const dh=te.reduce((s,t)=>s+t.h,0); if(dh) tkh+=dh;
+    if(!e&&!dh) continue;
+    const w=new Date(curY,curM-1,d).getDay(); const wh=cW(e);
+    if(e&&(e.type==='work'||e.type==='remote')) { wd++; th+=wh; }
+    if(e&&e.type==='paid') pd++;
+    if(e&&e.type==='half') pd+=0.5;
+    rows += `<tr ${canEdit(uid)?`onclick="openKM('${k}','${uid}')" style="cursor:pointer"`:''}>
+      <td>${curM}/${d}(${DAY[w]})</td>
+      <td>${e?`<span class="cbadge ${TB[e.type]}">${TL[e.type]}</span>`:'—'}</td>
+      <td>${e&&e.start||'—'}</td><td>${e&&e.end||'—'}</td>
+      <td>${e&&wh?fH(wh):'—'}</td>
+      <td>${e&&e.breakMin?e.breakMin+'分':'—'}</td>
+      <td>${e&&e.remote?'✓':'—'}</td>
+      <td>${dh?dh+'H':'—'}</td>
+    </tr>`;
+  }
+  document.getElementById('list-body').innerHTML = rows || '<tr><td colspan="8" style="text-align:center;color:var(--color-text-secondary);padding:1.5rem">記録なし</td></tr>';
+  document.getElementById('stats-grid').innerHTML = `
+    <div class="dcard"><div class="dcard-label">稼働日数</div><div class="dcard-val">${wd}<span class="dcard-unit">日</span></div></div>
+    <div class="dcard"><div class="dcard-label">総稼働時間</div><div class="dcard-val" style="font-size:18px">${fH(th)}</div></div>
+    <div class="dcard"><div class="dcard-label">有給取得</div><div class="dcard-val">${pd}<span class="dcard-unit">日</span></div></div>
+    <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${tkh}<span class="dcard-unit">H</span></div></div>`;
+}
+
+// ============================================================
+// 工数
+// ============================================================
+function renderWorkload() {
+  const uid = document.getElementById('wl-vsel')?.value || me.id;
+  document.getElementById('mt3').textContent = `${curY}年${curM}月`;
+  const dim=new Date(curY,curM,0).getDate();
+  const mt=gT(uid); const pmap={};
+  for(let d=1;d<=dim;d++) {
+    const k=dk(curY,curM,d);
+    (mt[k]||[]).forEach(t => { if(!pmap[t.proj]) pmap[t.proj]={}; if(!pmap[t.proj][t.task]) pmap[t.proj][t.task]=0; pmap[t.proj][t.task]+=t.h; });
+  }
+  const projs=Object.keys(pmap); let totalH=0, pt={};
+  projs.forEach(p => { pt[p]=Object.values(pmap[p]).reduce((s,v)=>s+v,0); totalH+=pt[p]; });
+  if(!projs.length) { document.getElementById('wl-table').innerHTML='<tr><td style="padding:1rem;color:var(--color-text-secondary)">工数データなし</td></tr>'; }
+  else {
+    let h=`<thead><tr><th style="text-align:left;padding:4px 8px">案件 / タスク</th><th style="padding:4px 8px">合計</th></tr></thead><tbody>`;
+    projs.forEach(p => {
+      h+=`<tr><td style="font-weight:500;padding:4px 8px">${p}</td><td style="text-align:center;font-weight:500;padding:4px 8px">${pt[p]}H</td></tr>`;
+      Object.entries(pmap[p]).forEach(([t,v]) => { h+=`<tr><td style="padding:4px 8px 4px 22px;color:var(--color-text-secondary)">└ ${t}</td><td style="text-align:center;padding:4px 8px">${v}H</td></tr>`; });
+    });
+    h+=`<tr style="font-weight:500;background:var(--color-background-secondary)"><td style="padding:4px 8px">合計</td><td style="text-align:center;padding:4px 8px">${totalH}H</td></tr></tbody>`;
+    document.getElementById('wl-table').innerHTML=h;
+  }
+}
+
+// ============================================================
+// 有給
+// ============================================================
+async function renderPaid() {
+  const uid = document.getElementById('paid-vsel')?.value || me.id;
+  paidVM = uid;
+  document.getElementById('paid-label').textContent = `${gA(uid)?.name||uid} の有給`;
+  document.getElementById('btn-add-paid').style.display = (me.role==='admin'||me.id===uid) ? '' : 'none';
+  if (!paidCache[uid]) {
+    showLoading('有給データ取得中...');
+    paidCache[uid] = await apiFetchPaid(uid);
+    hideLoading();
+  }
+  const yrs = paidCache[uid] || [];
+  let h='';
+  yrs.forEach(yr => {
+    const total=yr.prev+yr.granted, used=yr.entries.reduce((s,e)=>s+e.days,0), rem=Math.max(0,total-used);
+    h+=`<div class="paid-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px">
+        <div style="font-size:13px;font-weight:500">${yr.year}</div>
+        <div style="font-size:11px;color:var(--color-text-secondary)">残 <strong style="color:var(--color-text-primary)">${rem}</strong>日</div>
+      </div>
+      <div class="pbar-row"><div class="pbar-l">付与計</div><div class="pbar-bg"><div class="pbar-f" style="width:${total>0?100:0}%"></div></div><div class="pbar-v">${total}日</div></div>
+      <div class="pbar-row"><div class="pbar-l">取得済</div><div class="pbar-bg"><div class="pbar-f u" style="width:${total>0?Math.min(100,Math.round(used/total*100)):0}%"></div></div><div class="pbar-v">${used}日</div></div>`;
+    if(yr.entries.length) {
+      h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 18px;font-size:11px;margin-top:7px;padding-top:7px;border-top:0.5px solid var(--color-border-tertiary)">`;
+      yr.entries.forEach(e => { h+=`<div style="display:flex;justify-content:space-between;padding:2px 0;color:var(--color-text-secondary)"><span>${e.date}</span><span style="font-weight:500;color:var(--color-text-primary)">${e.days}日</span></div>`; });
+      h+=`</div>`;
+    }
+    h+=`</div>`;
+  });
+  document.getElementById('paid-content').innerHTML = h || '<div style="color:var(--color-text-secondary);font-size:12px">有給データなし</div>';
+}
+
+// ============================================================
+// チーム（管理者・準管理者）
+// ============================================================
+async function renderAdmin() {
+  document.getElementById('mt4').textContent = `${curY}年${curM}月`;
+  const vm = vMembers(); const dim = new Date(curY,curM,0).getDate();
+  showLoading('チームデータ取得中...');
+  try {
+    await Promise.all(vm.map(async a => {
+      if (!kintaiCache[a.id]) kintaiCache[a.id] = await apiFetchKintai(a.id, curY, curM);
+      if (!tasksCache[a.id]) tasksCache[a.id] = await apiFetchTasks(a.id, curY, curM);
+    }));
+  } catch(e) { showError(e.message); }
+  hideLoading();
+  let tg='';
+  vm.forEach(a => {
+    const md=gK(a.id), mt=gT(a.id); let wd=0,th=0,pd=0,tkh=0;
+    for(let d=1;d<=dim;d++) { const k=dk(curY,curM,d); const e=md[k]; if(e&&(e.type==='work'||e.type==='remote')){wd++;th+=cW(e)} if(e&&e.type==='paid')pd++; if(e&&e.type==='half')pd+=0.5; tkh+=tH(a.id,k); }
+    const rl={admin:'管理者',sub:'準管理者',member:'一般'}; const rc={admin:'ba',sub:'bs',member:'bm'};
+    tg+=`<div class="paid-card"><div style="font-size:12px;font-weight:500;margin-bottom:6px;display:flex;align-items:center;gap:5px"><i class="ti ti-user" style="font-size:12px"></i>${a.name}<span class="badge ${rc[a.role]}" style="font-size:10px">${rl[a.role]}</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:3px;font-size:11px;color:var(--color-text-secondary)">
+        <div style="display:flex;justify-content:space-between"><span>稼働日</span><span style="font-weight:500;color:var(--color-text-primary)">${wd}日</span></div>
+        <div style="display:flex;justify-content:space-between"><span>稼働時間</span><span style="font-weight:500;color:var(--color-text-primary)">${fH(th)}</span></div>
+        <div style="display:flex;justify-content:space-between"><span>有給</span><span style="font-weight:500;color:var(--color-text-primary)">${pd}日</span></div>
+        <div style="display:flex;justify-content:space-between"><span>工数</span><span style="font-weight:500;color:var(--color-text-primary)">${tkh}H</span></div>
+      </div></div>`;
+  });
+  document.getElementById('team-grid').innerHTML = tg;
+}
+
+// ============================================================
+// アカウント管理
+// ============================================================
+function renderAccounts() {
+  const rl={admin:'管理者',sub:'準管理者',member:'一般'};
+  const rc={admin:'badge ba',sub:'badge bs',member:'badge bm'};
+  document.getElementById('acct-body').innerHTML = accounts.map(a =>
+    `<tr onclick="openAcctModal('${a.id}')" style="cursor:pointer">
+      <td>${a.id}</td><td>${a.name}</td>
+      <td><span class="${rc[a.role]}">${rl[a.role]}</span></td>
+      <td style="font-size:11px;color:var(--color-text-secondary)">${a.role==='sub'?(a.scope||[]).map(id=>gA(id)?.name||id).join('、')||'なし':'—'}</td>
+    </tr>`
+  ).join('');
+}
+
+function openAcctModal(id) {
+  editAcctId = id; const a = id ? gA(id) : null;
+  document.getElementById('ma-t').textContent = id ? 'アカウント編集' : 'アカウント追加';
+  document.getElementById('ma-id').value = a ? a.id : '';
+  document.getElementById('ma-id').disabled = !!id;
+  document.getElementById('ma-email').value = '';
+  document.getElementById('ma-name').value = a ? a.name : '';
+  document.getElementById('ma-pw').value = '';
+  document.getElementById('ma-role').value = a ? a.role : 'member';
+  document.getElementById('ma-del').style.display = (id && id !== me.id) ? '' : 'none';
+  document.getElementById('ma-err').textContent = '';
+  updRoleUI(a);
+  document.getElementById('ma').style.display = 'flex';
+}
+
+function updRoleUI(a) {
+  const role = document.getElementById('ma-role').value;
+  document.getElementById('ma-scope-wrap').style.display = role === 'sub' ? '' : 'none';
+  if (role === 'sub') {
+    const scope = (a && a.scope) || [];
+    const uid = document.getElementById('ma-id').value || '__';
+    document.getElementById('ma-scope-list').innerHTML = accounts
+      .filter(ac => ac.id !== uid && ac.role !== 'admin')
+      .map(ac => `<label><input type="checkbox" value="${ac.id}" ${scope.includes(ac.id)?'checked':''}> ${ac.name}</label>`)
+      .join('') || '<span style="font-size:11px;color:var(--color-text-secondary)">メンバーがいません</span>';
+  }
+}
+
+async function saveAcct() {
+  const id = document.getElementById('ma-id').value.trim();
+  const name = document.getElementById('ma-name').value.trim();
+  const email = document.getElementById('ma-email').value.trim();
+  const pw = document.getElementById('ma-pw').value;
+  const role = document.getElementById('ma-role').value;
+  if (!id || !name) { document.getElementById('ma-err').textContent = 'IDと氏名は必須'; return; }
+  const scope = role === 'sub' ? [...document.querySelectorAll('#ma-scope-list input:checked')].map(c => c.value) : [];
+  showLoading('保存中...');
+  try {
+    if (editAcctId) {
+      await apiUpdateAccount({ id, name, role, scope });
+      const a = gA(id); if (a) { a.name=name; a.role=role; a.scope=scope; }
+      if (me.id === id) { me.name=name; me.role=role; me.scope=scope; }
+    } else {
+      if (!email || !pw) { hideLoading(); document.getElementById('ma-err').textContent = '新規はメールとパスワードを入力'; return; }
+      await apiCreateAccount({ id, name, email, password: pw, role, scope });
+      accounts = await apiFetchAccounts();
+    }
+    hideLoading(); hm('ma'); renderAccounts(); initVSels();
+  } catch(e) { hideLoading(); document.getElementById('ma-err').textContent = e.message; }
+}
+
+async function delAcct() {
+  if (!confirm(`${editAcctId} を削除しますか？`)) return;
+  showLoading('削除中...');
+  try {
+    await apiDeleteAccount(editAcctId);
+    accounts = accounts.filter(a => a.id !== editAcctId);
+    hideLoading(); hm('ma'); renderAccounts(); initVSels();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+// ============================================================
+// マスタ
+// ============================================================
+function renderMaster() {
+  document.getElementById('proj-list').innerHTML = master.projects.map((p,i) =>
+    `<div class="mtag">${p}<span class="x" onclick="delProj('${p}')">×</span></div>`
+  ).join('');
+  document.getElementById('task-mlist').innerHTML = master.tasks.map((t,i) =>
+    `<div class="mtag"><span style="color:var(--color-text-secondary);font-size:9px;margin-right:2px">${t.proj||''}</span>${t.name}<span class="x" onclick="delTaskM('${t.name}','${t.proj}')">×</span></div>`
+  ).join('');
+  document.getElementById('ntp').innerHTML = '<option value="">案件（任意）</option>' + master.projects.map(p => `<option value="${p}">${p}</option>`).join('');
+}
+
+async function addProj() {
+  const v = document.getElementById('np').value.trim(); if(!v) return;
+  try { await apiAddProject(v); const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[]; document.getElementById('np').value=''; renderMaster(); }
+  catch(e) { showError(e.message); }
+}
+async function delProj(name) {
+  try { await apiDeleteProject(name); const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[]; renderMaster(); }
+  catch(e) { showError(e.message); }
+}
+async function addTaskM() {
+  const p=document.getElementById('ntp').value, n=document.getElementById('ntn').value.trim(); if(!n) return;
+  try { await apiAddTask(p,n); const m = await apiFetchMaster(); master=m; document.getElementById('ntn').value=''; renderMaster(); }
+  catch(e) { showError(e.message); }
+}
+async function delTaskM(name, proj) {
+  try { await apiDeleteTask(name,proj); const m = await apiFetchMaster(); master=m; renderMaster(); }
+  catch(e) { showError(e.message); }
+}
+
+// ============================================================
+// 勤怠モーダル
+// ============================================================
+function openKM(k, uid) {
+  uid = uid || me.id; kmUID = uid; editKKey = k;
+  const md = gK(uid); const e = k && md[k] || {};
+  document.getElementById('mk-t').textContent = k ? `${k}（${gA(uid)?.name||uid}）` : '勤怠入力';
+  document.getElementById('mk-d').value = k || dk(new Date().getFullYear(), new Date().getMonth()+1, new Date().getDate());
+  document.getElementById('mk-type').value = e.type || 'work';
+  document.getElementById('mk-s').value = e.start || '';
+  document.getElementById('mk-e').value = e.end || '';
+  document.getElementById('mk-b').value = e.breakMin != null ? e.breakMin : 60;
+  document.getElementById('mk-r').checked = !!e.remote;
+  document.getElementById('mk-del').style.display = (k && md[k]) ? '' : 'none';
+  document.getElementById('mk').style.display = 'flex';
+}
+
+async function saveK() {
+  const k = document.getElementById('mk-d').value; if(!k) return;
+  const entry = {
+    type: document.getElementById('mk-type').value,
+    start: document.getElementById('mk-s').value,
+    end: document.getElementById('mk-e').value,
+    breakMin: parseInt(document.getElementById('mk-b').value) || 0,
+    remote: document.getElementById('mk-r').checked
+  };
+  showLoading('保存中...');
+  try {
+    await apiSaveKintai(kmUID, k, entry);
+    if (!kintaiCache[kmUID]) kintaiCache[kmUID] = {};
+    kintaiCache[kmUID][k] = entry;
+    hideLoading(); hm('mk'); renderCalendar();
+    if (document.getElementById('sec-list').classList.contains('active')) renderList();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+async function delK() {
+  showLoading('削除中...');
+  try {
+    await apiDeleteKintai(kmUID, editKKey);
+    delete kintaiCache[kmUID][editKKey];
+    hideLoading(); hm('mk'); renderCalendar();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+// ============================================================
+// 工数モーダル
+// ============================================================
+function openTM(k, uid) {
+  uid = uid || me.id; tmUID = uid; editTKey = k; newH = 0.5;
+  const today = new Date();
+  document.getElementById('mt-t').textContent = k ? `${k}（${gA(uid)?.name||uid}）工数` : '工数入力';
+  document.getElementById('mt-d').value = k || dk(today.getFullYear(), today.getMonth()+1, today.getDate());
+  const ps = document.getElementById('ta-proj');
+  ps.innerHTML = '<option value="">案件</option>' + master.projects.map(p => `<option value="${p}">${p}</option>`).join('');
+  updTS(); renderTEL(k); document.getElementById('nh-val').textContent = newH;
+  document.getElementById('mt').style.display = 'flex';
+}
+
+function renderTEL(k) {
+  const k2 = k || document.getElementById('mt-d').value;
+  const te = gT(tmUID)[k2] || [];
+  const tot = te.reduce((s,t) => s+t.h, 0);
+  let h = te.map((t,i) =>
+    `<div style="display:flex;align-items:center;gap:4px;padding:4px 3px;border-bottom:0.5px solid var(--color-border-tertiary);font-size:11px">
+      <span class="cbadge bw">${t.proj}</span>
+      <span style="flex:1;color:var(--color-text-secondary)">${t.task}</span>
+      <div class="hs"><button onclick="adjTE(${i},-0.5)">−</button><span>${t.h}H</span><button onclick="adjTE(${i},0.5)">＋</button></div>
+      <span style="cursor:pointer;color:var(--color-text-tertiary)" onclick="delTE(${i})"><i class="ti ti-trash"></i></span>
+    </div>`
+  ).join('');
+  if(!h) h='<div style="color:var(--color-text-secondary);font-size:11px;padding:5px">タスクを追加してください</div>';
+  document.getElementById('tel').innerHTML = h;
+  document.getElementById('mt-tot').textContent = tot;
+}
+
+function adjTE(i, d) {
+  const k = document.getElementById('mt-d').value;
+  if (!gT(tmUID)[k]) return;
+  gT(tmUID)[k][i].h = Math.max(0.5, gT(tmUID)[k][i].h + d);
+  renderTEL(k);
+}
+function delTE(i) {
+  const k = document.getElementById('mt-d').value;
+  if (gT(tmUID)[k]) gT(tmUID)[k].splice(i, 1);
+  renderTEL(k);
+}
+function updTS() {
+  const proj = document.getElementById('ta-proj').value;
+  const ts = proj ? master.tasks.filter(t => !t.proj || t.proj === proj) : master.tasks;
+  document.getElementById('ta-task').innerHTML = '<option value="">タスク</option>' + ts.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+}
+function adjNH(d) { newH = Math.max(0.5, newH + d); document.getElementById('nh-val').textContent = newH; }
+function addTE() {
+  const proj=document.getElementById('ta-proj').value, task=document.getElementById('ta-task').value;
+  if(!proj||!task) return;
+  const k=document.getElementById('mt-d').value; if(!k) return;
+  if(!gT(tmUID)[k]) gT(tmUID)[k]=[];
+  const ex=gT(tmUID)[k].find(t=>t.proj===proj&&t.task===task);
+  if(ex) ex.h+=newH; else gT(tmUID)[k].push({proj,task,h:newH});
+  renderTEL(k);
+}
+
+async function saveT() {
+  const k = document.getElementById('mt-d').value; if(!k) return;
+  const entries = gT(tmUID)[k] || [];
+  showLoading('保存中...');
+  try {
+    await apiSaveTaskEntries(tmUID, k, entries);
+    hideLoading(); hm('mt'); renderCalendar();
+    if (document.getElementById('sec-workload').classList.contains('active')) renderWorkload();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+// ============================================================
+// 有給モーダル
+// ============================================================
+function openAddPaid() {
+  const uid = paidVM || me.id;
+  const today = new Date();
+  document.getElementById('mp-d').value = dk(today.getFullYear(), today.getMonth()+1, today.getDate());
+  document.getElementById('mp-d').dataset.uid = uid;
+  const yrs = paidCache[uid] || [];
+  document.getElementById('mp-yr').innerHTML = yrs.map((y,i) => `<option value="${i}" data-gid="${y.id}">${y.year}</option>`).join('');
+  document.getElementById('mp-yr').value = yrs.length - 1;
+  document.getElementById('mp').style.display = 'flex';
+}
+
+async function savePaid() {
+  const uid = document.getElementById('mp-d').dataset.uid || me.id;
+  const date = document.getElementById('mp-d').value;
+  const days = parseFloat(document.getElementById('mp-days').value);
+  const opt = document.getElementById('mp-yr').options[document.getElementById('mp-yr').selectedIndex];
+  const grantId = parseInt(opt?.dataset.gid);
+  if (!date || isNaN(grantId)) return;
+  showLoading('保存中...');
+  try {
+    await apiAddPaidUsage(grantId, uid, date, days);
+    delete paidCache[uid];  // キャッシュ削除して再取得
+    hideLoading(); hm('mp'); renderPaid();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+function hm(id) { document.getElementById(id).style.display = 'none'; }
+
+// ============================================================
+// 起動（セッション復元）
+// ============================================================
+window.addEventListener('load', async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    me = await apiGetMe();
+    if (me) { await initApp(); return; }
+  }
+  document.getElementById('pg-login').style.display = 'flex';
+});
+</script>
+
+<!-- ============================================================
+     HTML
+     ============================================================ -->
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@2.44.0/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sans-serif;background:#f8f8f6;color:#1a1a18;min-height:100vh}
+#loading-overlay{position:fixed;inset:0;background:rgba(255,255,255,.85);display:none;align-items:center;justify-content:center;z-index:999;flex-direction:column;gap:10px}
+#loading-spinner{width:28px;height:28px;border:2px solid #ddd;border-top-color:#1a1a18;border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+#loading-msg{font-size:13px;color:#666}
+#global-error{position:fixed;top:12px;right:12px;background:#FCEBEB;color:#A32D2D;border:0.5px solid #A32D2D;border-radius:8px;padding:10px 16px;font-size:13px;z-index:1000;display:none}
+.container{max-width:960px;margin:0 auto;padding:1rem}
+.login-wrap{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:2rem}
+.login-card{background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:12px;padding:1.75rem;width:100%;max-width:340px;box-shadow:0 2px 8px rgba(0,0,0,.06)}
+.login-card h2{font-size:17px;font-weight:500;margin-bottom:3px}
+.login-card > p{font-size:12px;color:#888;margin-bottom:1.25rem}
+.hint{background:#f5f5f3;border-radius:8px;padding:.625rem;font-size:11px;color:#888;margin-top:.875rem;line-height:1.7}
+.err-msg{font-size:12px;color:#A32D2D;margin-top:6px;min-height:14px}
+.fr{margin-bottom:10px}
+.fr label{font-size:12px;color:#666;display:block;margin-bottom:3px}
+.fr input,.fr select,.fr textarea{width:100%;font-size:14px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:7px 10px;background:#fff;color:#1a1a18}
+.fr input:focus,.fr select:focus{outline:none;border-color:rgba(0,0,0,.4)}
+.top-bar{display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:0.5px solid rgba(0,0,0,.08);margin-bottom:.875rem;flex-wrap:wrap}
+.top-bar h1{font-size:15px;font-weight:500;flex:1}
+.badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:20px;font-size:11px}
+.ba{background:#E6F1FB;color:#0C447C}.bs{background:#FAEEDA;color:#854F0B}.bm{background:#EAF3DE;color:#3B6D11}
+.tabs{display:flex;gap:1px;border-bottom:0.5px solid rgba(0,0,0,.1);margin-bottom:1rem;flex-wrap:wrap;overflow-x:auto}
+.tab{padding:7px 11px;font-size:12px;cursor:pointer;border:none;background:none;color:#666;border-bottom:2px solid transparent;margin-bottom:-0.5px;white-space:nowrap}
+.tab.active{color:#1a1a18;border-bottom-color:#1a1a18;font-weight:500}
+.tab:hover:not(.active){color:#1a1a18}
+.section{display:none}.section.active{display:block}
+.month-nav{display:flex;align-items:center;gap:8px;margin-bottom:1rem}
+.month-nav > button:not(.btn){background:none;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;width:27px;height:27px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:#1a1a18}
+.month-nav > button:not(.btn):hover{background:#f0f0ee}
+.month-title{font-size:14px;font-weight:500;min-width:96px}
+.vsel{font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:3px 7px;background:#fff;color:#1a1a18}
+.calendar{width:100%;border-collapse:collapse}
+.calendar th{font-size:11px;color:#888;padding:4px;text-align:center;font-weight:400;border-bottom:0.5px solid rgba(0,0,0,.1)}
+.calendar td{border:0.5px solid rgba(0,0,0,.1);vertical-align:top;padding:3px;height:68px;width:14.28%}
+.cal-date{font-size:11px;font-weight:500;margin-bottom:2px}
+.cal-date.sun{color:#E24B4A}.cal-date.sat{color:#378ADD}
+.cal-today{background:#1a1a18;color:#fff;border-radius:50%;width:17px;height:17px;display:flex;align-items:center;justify-content:center;font-size:10px}
+.cbadge{font-size:9px;padding:1px 4px;border-radius:3px;display:inline-block}
+.bw{background:#E6F1FB;color:#0C447C}.bp{background:#EAF3DE;color:#3B6D11}
+.bh{background:#FAEEDA;color:#854F0B}.bho{background:#FCEBEB;color:#A32D2D}.br{background:#EEEDFE;color:#3C3489}
+.clickable{cursor:pointer}.clickable:hover{background:#f5f5f3}
+.dcard{background:#f5f5f3;border-radius:8px;padding:.875rem}
+.dcard-label{font-size:11px;color:#888;margin-bottom:5px;display:flex;align-items:center;gap:5px}
+.dcard-val{font-size:22px;font-weight:500}
+.dcard-unit{font-size:11px;color:#888}
+.dash-row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.dash-panel{background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:8px;padding:.875rem}
+.dash-panel h4{font-size:12px;font-weight:500;margin-bottom:.625rem;color:#888}
+.stats-grid,.dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:1rem}
+.dt{width:100%;border-collapse:collapse;font-size:12px}
+.dt th{font-size:11px;color:#888;font-weight:400;text-align:left;padding:4px 7px;border-bottom:0.5px solid rgba(0,0,0,.1)}
+.dt td{padding:4px 7px;border-bottom:0.5px solid rgba(0,0,0,.08)}
+.dt tr:last-child td{border-bottom:none}
+.wlw{overflow-x:auto}
+.wlt{border-collapse:collapse;font-size:11px;min-width:400px;width:100%}
+.wlt th{background:#f5f5f3;padding:4px 9px;text-align:center;border:0.5px solid rgba(0,0,0,.1);font-weight:400;color:#888}
+.wlt td{padding:4px 9px;border:0.5px solid rgba(0,0,0,.08)}
+.paid-card{background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:8px;padding:.875rem;margin-bottom:8px}
+.pbar-row{display:flex;gap:7px;align-items:center;font-size:11px;margin-bottom:4px}
+.pbar-l{min-width:50px;color:#888}
+.pbar-bg{flex:1;background:#f0f0ee;border-radius:3px;height:6px;overflow:hidden}
+.pbar-f{height:100%;border-radius:3px;background:#3B6D11}
+.pbar-f.u{background:#378ADD}
+.pbar-v{min-width:24px;text-align:right;font-weight:500;font-size:11px}
+.team-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:8px;margin-bottom:1rem}
+.mo{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.42);display:flex;align-items:center;justify-content:center;z-index:100}
+.mc{background:#fff;border-radius:12px;border:0.5px solid rgba(0,0,0,.12);padding:1.25rem;width:90%;max-width:430px;max-height:88vh;overflow-y:auto}
+.mc h3{font-size:14px;font-weight:500;margin-bottom:.875rem}
+.tr2{display:flex;gap:5px}.tr2 input{flex:1}
+.mbtns{display:flex;gap:6px;margin-top:.875rem;justify-content:flex-end}
+.tel{max-height:170px;overflow-y:auto;border:0.5px solid rgba(0,0,0,.12);border-radius:6px;padding:4px;margin-bottom:6px}
+.hs{display:flex;gap:3px;align-items:center}
+.hs button{width:21px;height:21px;border:0.5px solid rgba(0,0,0,.2);border-radius:3px;background:#f5f5f3;cursor:pointer;font-size:12px;display:flex;align-items:center;justify-content:center}
+.hs span{min-width:30px;text-align:center;font-size:11px;font-weight:500}
+.tadd-row{display:flex;gap:4px;align-items:center;flex-wrap:wrap;margin-bottom:5px}
+.tadd-row select{font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px;background:#fff}
+.scope-list{display:flex;flex-direction:column;gap:3px;max-height:110px;overflow-y:auto;border:0.5px solid rgba(0,0,0,.12);border-radius:6px;padding:5px;margin-top:3px}
+.scope-list label{font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer}
+.msec{margin-bottom:1.25rem}
+.msec h3{font-size:12px;font-weight:500;color:#888;margin-bottom:.5rem}
+.mlist{display:flex;flex-wrap:wrap;gap:4px;margin-bottom:.5rem}
+.mtag{display:flex;align-items:center;gap:3px;padding:2px 7px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;font-size:11px;background:#f5f5f3}
+.mtag .x{cursor:pointer;color:#aaa;font-size:12px}.mtag .x:hover{color:#A32D2D}
+.ar{display:flex;gap:5px;align-items:center}
+.ar input{font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff}
+.ar select{font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px;background:#fff}
+.btn{padding:5px 11px;border-radius:6px;font-size:12px;cursor:pointer;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#1a1a18}
+.btn:hover{background:#f5f5f3}
+.btn-p{background:#1a1a18;color:#fff;border-color:#1a1a18}
+.btn-p:hover{opacity:.85}
+.btn-d{color:#A32D2D;border-color:#A32D2D}.btn-d:hover{background:#FCEBEB}
+.btn-full{width:100%;padding:8px;font-size:13px;margin-top:3px}
+.btn-sm{padding:3px 9px;font-size:11px}
+</style>
+
+<!-- Loading overlay -->
+<div id="loading-overlay" style="display:flex">
+  <div id="loading-spinner"></div>
+  <div id="loading-msg">読み込み中...</div>
+</div>
+<div id="global-error"></div>
+
+<!-- Login -->
+<div id="pg-login" style="display:none">
+<div class="login-wrap">
+<div class="login-card">
+  <h2><i class="ti ti-clock" aria-hidden="true"></i> 勤怠・工数管理</h2>
+  <p>メールアドレスとパスワードでログイン</p>
+  <div class="fr"><label>メールアドレス</label><input type="email" id="li-email" placeholder="your@email.com" autocomplete="email"></div>
+  <div class="fr"><label>パスワード</label><input type="password" id="li-pw" placeholder="パスワード" autocomplete="current-password" onkeydown="if(event.key==='Enter')doLogin()"></div>
+  <div class="err-msg" id="li-err"></div>
+  <button class="btn btn-p btn-full" onclick="doLogin()">ログイン</button>
+  <div class="hint">ログインできない場合は管理者にアカウント作成を依頼してください</div>
+</div>
+</div>
+</div>
+
+<!-- App -->
+<div id="pg-app" style="display:none">
+<div class="container">
+  <div class="top-bar">
+    <h1><i class="ti ti-clock" aria-hidden="true"></i> 勤怠・工数管理</h1>
+    <span class="badge" id="role-badge"></span>
+    <span id="login-name" style="font-size:11px;color:#888"></span>
+    <button class="btn btn-sm" onclick="doLogout()"><i class="ti ti-logout" aria-hidden="true"></i> ログアウト</button>
+  </div>
+  <div class="tabs" id="tab-bar"></div>
+
+  <!-- Dashboard -->
+  <div id="sec-dashboard" class="section active">
+    <div style="font-size:15px;font-weight:500;margin-bottom:1rem" id="dash-greeting"></div>
+    <div class="dash-grid" id="dash-grid"></div>
+    <div class="dash-row">
+      <div class="dash-panel"><h4><i class="ti ti-chart-bar" aria-hidden="true"></i> 今月の工数（案件別）</h4><div id="dash-proj-bars"></div></div>
+      <div class="dash-panel"><h4><i class="ti ti-clock" aria-hidden="true"></i> 直近の勤怠</h4><div id="dash-recent"></div></div>
+    </div>
+  </div>
+
+  <!-- Calendar -->
+  <div id="sec-calendar" class="section">
+    <div class="month-nav">
+      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+      <div class="month-title" id="mt1"></div>
+      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+      <select class="vsel" id="cal-vsel" onchange="switchViewMember('cal-vsel')" style="display:none"></select>
+      <button class="btn btn-sm" onclick="openKM(null)" style="margin-left:auto"><i class="ti ti-plus"></i> 勤怠</button>
+      <button class="btn btn-sm" onclick="openTM(null)"><i class="ti ti-plus"></i> 工数</button>
+    </div>
+    <table class="calendar"><thead><tr><th style="color:#E24B4A">日</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th style="color:#378ADD">土</th></tr></thead><tbody id="cal-body"></tbody></table>
+  </div>
+
+  <!-- List -->
+  <div id="sec-list" class="section">
+    <div class="month-nav">
+      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+      <div class="month-title" id="mt2"></div>
+      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+      <select class="vsel" id="list-vsel" onchange="switchViewMember('list-vsel')" style="display:none"></select>
+    </div>
+    <div class="stats-grid" id="stats-grid"></div>
+    <table class="dt"><thead><tr><th>日付</th><th>区分</th><th>出社</th><th>退社</th><th>稼働</th><th>休憩</th><th>在宅</th><th>工数</th></tr></thead><tbody id="list-body"></tbody></table>
+  </div>
+
+  <!-- Workload -->
+  <div id="sec-workload" class="section">
+    <div class="month-nav">
+      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+      <div class="month-title" id="mt3"></div>
+      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+      <select class="vsel" id="wl-vsel" onchange="switchViewMember('wl-vsel')" style="display:none"></select>
+    </div>
+    <div class="wlw"><table class="wlt" id="wl-table"></table></div>
+  </div>
+
+  <!-- Paid -->
+  <div id="sec-paid" class="section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.875rem">
+      <div style="font-size:12px;color:#888" id="paid-label"></div>
+      <div style="display:flex;gap:5px">
+        <select class="vsel" id="paid-vsel" onchange="renderPaid()"></select>
+        <button class="btn btn-sm" onclick="openAddPaid()" id="btn-add-paid"><i class="ti ti-plus"></i> 取得追加</button>
+      </div>
+    </div>
+    <div id="paid-content"></div>
+  </div>
+
+  <!-- Admin -->
+  <div id="sec-admin" class="section">
+    <div class="month-nav">
+      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+      <div class="month-title" id="mt4"></div>
+      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+    </div>
+    <div class="team-grid" id="team-grid"></div>
+  </div>
+
+  <!-- Accounts -->
+  <div id="sec-accounts" class="section">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.875rem">
+      <div style="font-size:13px;font-weight:500">アカウント管理</div>
+      <button class="btn btn-p btn-sm" onclick="openAcctModal(null)"><i class="ti ti-plus"></i> 追加</button>
+    </div>
+    <table class="dt" style="cursor:pointer"><thead><tr><th>ID</th><th>氏名</th><th>権限</th><th>担当範囲</th></tr></thead><tbody id="acct-body"></tbody></table>
+  </div>
+
+  <!-- Master -->
+  <div id="sec-master" class="section">
+    <div class="msec"><h3>案件マスタ</h3><div class="mlist" id="proj-list"></div><div class="ar"><input type="text" id="np" placeholder="案件名..." style="max-width:190px"><button class="btn btn-sm" onclick="addProj()"><i class="ti ti-plus"></i></button></div></div>
+    <div class="msec"><h3>タスクマスタ</h3><div class="mlist" id="task-mlist"></div><div class="ar"><select id="ntp" style="width:130px"><option value="">案件</option></select><input type="text" id="ntn" placeholder="タスク名..." style="max-width:150px"><button class="btn btn-sm" onclick="addTaskM()"><i class="ti ti-plus"></i></button></div></div>
+  </div>
+</div>
+</div>
+
+<!-- Kintai Modal -->
+<div id="mk" class="mo" style="display:none" onclick="if(event.target===this)hm('mk')">
+<div class="mc" onclick="event.stopPropagation()">
+  <h3 id="mk-t">勤怠入力</h3>
+  <div class="fr"><label>日付</label><input type="date" id="mk-d"></div>
+  <div class="fr"><label>区分</label><select id="mk-type"><option value="work">出勤</option><option value="paid">有給</option><option value="half">半休</option><option value="holiday">祝日</option><option value="remote">在宅</option></select></div>
+  <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s"><input type="time" id="mk-e"></div></div>
+  <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15"></div>
+  <div class="fr"><label><input type="checkbox" id="mk-r" style="width:auto;margin-right:4px">在宅勤務</label></div>
+  <div class="mbtns">
+    <button class="btn btn-d" id="mk-del" onclick="delK()" style="display:none;margin-right:auto">削除</button>
+    <button class="btn" onclick="hm('mk')">キャンセル</button>
+    <button class="btn btn-p" onclick="saveK()">保存</button>
+  </div>
+</div></div>
+
+<!-- Task Modal -->
+<div id="mt" class="mo" style="display:none" onclick="if(event.target===this)hm('mt')">
+<div class="mc" onclick="event.stopPropagation()">
+  <h3 id="mt-t">工数入力</h3>
+  <div class="fr"><label>日付</label><input type="date" id="mt-d"></div>
+  <div class="tel" id="tel"></div>
+  <div class="tadd-row">
+    <select id="ta-proj" onchange="updTS()" style="flex:1;min-width:110px"><option value="">案件</option></select>
+    <select id="ta-task" style="flex:1;min-width:110px"><option value="">タスク</option></select>
+    <div class="hs"><button onclick="adjNH(-0.5)">−</button><span id="nh-val">0.5</span><button onclick="adjNH(0.5)">＋</button></div>
+    <button class="btn btn-sm" onclick="addTE()"><i class="ti ti-plus"></i></button>
+  </div>
+  <div style="font-size:11px;color:#888;margin-top:5px">合計: <strong id="mt-tot">0</strong> H</div>
+  <div class="mbtns"><button class="btn" onclick="hm('mt')">キャンセル</button><button class="btn btn-p" onclick="saveT()">保存</button></div>
+</div></div>
+
+<!-- Paid Modal -->
+<div id="mp" class="mo" style="display:none" onclick="if(event.target===this)hm('mp')">
+<div class="mc" onclick="event.stopPropagation()">
+  <h3>有給取得を追加</h3>
+  <div class="fr"><label>日付</label><input type="date" id="mp-d"></div>
+  <div class="fr"><label>取得日数</label><select id="mp-days"><option value="1">1日</option><option value="0.5">0.5日（半休）</option></select></div>
+  <div class="fr"><label>付与年度</label><select id="mp-yr"></select></div>
+  <div class="mbtns"><button class="btn" onclick="hm('mp')">キャンセル</button><button class="btn btn-p" onclick="savePaid()">保存</button></div>
+</div></div>
+
+<!-- Account Modal -->
+<div id="ma" class="mo" style="display:none" onclick="if(event.target===this)hm('ma')">
+<div class="mc" onclick="event.stopPropagation()">
+  <h3 id="ma-t">アカウント</h3>
+  <div class="fr"><label>ユーザーID</label><input type="text" id="ma-id" placeholder="半角英数字（例: yamamoto）"></div>
+  <div class="fr"><label>氏名</label><input type="text" id="ma-name"></div>
+  <div class="fr" id="ma-email-wrap"><label>メールアドレス（新規のみ）</label><input type="email" id="ma-email"></div>
+  <div class="fr"><label>パスワード（新規必須・変更時は空欄でOK）</label><input type="password" id="ma-pw"></div>
+  <div class="fr"><label>権限</label><select id="ma-role" onchange="updRoleUI()"><option value="admin">管理者</option><option value="sub">準管理者</option><option value="member">一般</option></select></div>
+  <div id="ma-scope-wrap" style="display:none"><div class="fr"><label>閲覧可能なメンバー</label><div class="scope-list" id="ma-scope-list"></div></div></div>
+  <div class="err-msg" id="ma-err"></div>
+  <div class="mbtns">
+    <button class="btn btn-d" id="ma-del" onclick="delAcct()" style="display:none;margin-right:auto">削除</button>
+    <button class="btn" onclick="hm('ma')">キャンセル</button>
+    <button class="btn btn-p" onclick="saveAcct()">保存</button>
+  </div>
+</div></div>
+
+</body>
+</html>
