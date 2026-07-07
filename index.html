@@ -935,6 +935,25 @@ function openTM(k, uid) {
   renderTplBtns();
   document.getElementById('nh-val').textContent = newH;
   document.getElementById('tpl-save-name').value = '';
+   // その日の勤怠情報を表示
+const kintaiInfo = document.getElementById('mt-kintai-info');
+if (kintaiInfo) {
+  const kd = gK(tmUID);
+  const dateKey = k || dk(today.getFullYear(), today.getMonth()+1, today.getDate());
+  const ke = kd[dateKey];
+  if (ke && ke.start && ke.end) {
+    const sh = parseInt(ke.start)*60 + parseInt(ke.start.slice(3));
+    const eh = parseInt(ke.end)*60 + parseInt(ke.end.slice(3));
+    const total = Math.max(0, eh - sh - (ke.breakMin||60));
+    const h = Math.floor(total/60);
+    const m = total % 60;
+    kintaiInfo.textContent = `勤怠: ${ke.start}〜${ke.end}（稼働 ${h}時間${m>0?m+'分':''}）`;
+    kintaiInfo.style.color = total > 8*60 ? '#a32d2d' : '#0f6e56';
+  } else {
+    kintaiInfo.textContent = '勤怠記録なし';
+    kintaiInfo.style.color = '#aaa';
+  }
+}
   document.getElementById('mt').style.display = 'flex';
 }
 
@@ -1864,7 +1883,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       </button>
     </div>
   </div>
-  <div style="font-size:11px;color:#888">合計: <strong id="mt-tot">0</strong> H &nbsp;／&nbsp; 直前を複製: <button class="btn btn-sm" onclick="duplicateLastEntry()" style="font-size:10px;padding:2px 8px"><i class="ti ti-copy"></i></button></div>
+<div style="font-size:11px;color:#888;margin-bottom:4px" id="mt-kintai-info"></div>
+<div style="font-size:11px;color:#888">合計: <strong id="mt-tot">0</strong> H &nbsp;／&nbsp; 直前を複製: <button class="btn btn-sm" onclick="duplicateLastEntry()" style="font-size:10px;padding:2px 8px"><i class="ti ti-copy"></i></button></div>
   <div class="mbtns"><button class="btn" onclick="hm('mt')">キャンセル</button><button class="btn btn-p" onclick="saveT()">保存</button></div>
 </div></div>
 
