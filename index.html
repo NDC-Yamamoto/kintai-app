@@ -401,7 +401,8 @@ async function cm(d) {
   curM += d;
   if (curM > 12) { curM = 1; curY++; }
   if (curM < 1)  { curM = 12; curY--; }
-  // 表示中のメンバーのデータを再取得
+  kintaiCache = {};
+  tasksCache = {};
   const uid = getCurrentViewUID();
   showLoading('データ取得中...');
   try {
