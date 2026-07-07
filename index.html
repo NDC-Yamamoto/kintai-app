@@ -420,6 +420,16 @@ async function cm(d) {
   if (a) showTab(a.id.replace('sec-',''));
 }
 
+   function goToday() {
+  const now = new Date();
+  curY = now.getFullYear();
+  curM = now.getMonth() + 1;
+  kintaiCache = {};
+  tasksCache = {};
+  const a = document.querySelector('.section.active');
+  if (a) showTab(a.id.replace('sec-',''));
+}
+
 function getCurrentViewUID() {
   const sels = ['cal-vsel','list-vsel','wl-vsel'];
   for (const id of sels) {
