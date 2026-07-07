@@ -110,7 +110,9 @@ async function apiFetchKintai(userId, year, month) {
       start: r.start_time ? r.start_time.slice(0,5) : '',
       end: r.end_time ? r.end_time.slice(0,5) : '',
       breakMin: r.break_min,
-      remote: r.is_remote
+      remote: r.is_remote,
+      trip: r.loc_trip,
+      umeda: r.loc_umeda
     };
   });
   return map;
@@ -124,10 +126,10 @@ async function apiSaveKintai(userId, date, entry) {
     start_time: entry.start || null,
     end_time: entry.end || null,
     break_min: entry.breakMin || 60,
-   is_remote: !!entry.remote,
-loc_remote: !!entry.remote,
-loc_trip: !!entry.trip,
-loc_umeda: !!entry.umeda
+    is_remote: !!entry.remote,
+    loc_remote: !!entry.remote,
+    loc_trip: !!entry.trip,
+    loc_umeda: !!entry.umeda
   };
   const { error } = await sb.from('kintai_records').upsert(record, { onConflict: 'user_id,date' });
   if (error) throw error;
@@ -877,8 +879,9 @@ function openKM(k, uid) {
   document.getElementById('mk-e').value = e.end || '';
   document.getElementById('mk-b').value = e.breakMin != null ? e.breakMin : 60;
   document.getElementById('mk-r').checked = !!e.remote;
-document.getElementById('mk-trip').checked = !!e.trip;
-document.getElementById('mk-umeda').checked = !!e.umeda;
+  document.getElementById('mk-trip').checked = !!e.trip;
+  document.getElementById('mk-umeda').checked = !!e.umeda;
+  calcKintaiTime();
   document.getElementById('mk-del').style.display = (k && md[k]) ? '' : 'none';
   document.getElementById('mk').style.display = 'flex';
 }
@@ -890,7 +893,9 @@ async function saveK() {
     start: document.getElementById('mk-s').value,
     end: document.getElementById('mk-e').value,
     breakMin: parseInt(document.getElementById('mk-b').value) || 0,
-    remote: document.getElementById('mk-r').checked
+    remote: document.getElementById('mk-r').checked,
+    trip: document.getElementById('mk-trip').checked,
+    umeda: document.getElementById('mk-umeda').checked
   };
   showLoading('保存中...');
   try {
@@ -974,67 +979,26 @@ async function saveCurrentAsTemplate() {
 function filterProjSuggest() {
   const q = document.getElementById('ta-proj-input').value.trim().toLowerCase();
   const el = document.getElementById('proj-suggest');
-
-function filterNtpSuggest() {
-  const q = document.getElementById('ntp-input').value.trim().toLowerCase();
-  const el = document.getElementById('ntp-suggest');
-  if (!q) { el.style.display = 'none'; return; }
-  const candidates = [...master.projects]
-    .sort((a, b) => a.localeCompare(b, 'ja'))
-    .filter(p => p.toLowerCase().includes(q));
-  let html = candidates.map(p =>
-    `<div onclick="selectNtp('${p.replace(/'/g,"\\'")}')"
-      style="padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,.06)"
-      onmouseover="this.style.background='#f5f5f3'" onmouseout="this.style.background=''">${p}</div>`
-  ).join('');
-  if (!html) html = '<div style="padding:6px 10px;font-size:12px;color:#aaa">見つかりません</div>';
-  el.innerHTML = html;
-  el.style.display = 'block';
-}
-
-function selectNtp(name) {
-  document.getElementById('ntp-input').value = name;
-  document.getElementById('ntp').value = name;
-  hideNtpSuggest();
-}
-
-function hideNtpSuggest() {
-  const el = document.getElementById('ntp-suggest');
-  if (el) el.style.display = 'none';
-}
-   
-  // 文字が入力されていない場合は候補を表示しない
-  if (!q) { el.style.display = 'none'; return; }
-
   const recent = Object.values(gT(tmUID)).flat().map(e => e.proj).filter(Boolean);
   const recentSet = [...new Set(recent)].slice(0, 5);
-
-  // あいうえお順にソートしてから絞り込み
-  let candidates = [...master.projects]
-    .sort((a, b) => a.localeCompare(b, 'ja'))
-    .filter(p => p.toLowerCase().includes(q));
-
-  // 最近使った案件を上位に
+  let candidates = master.projects;
+  if (q) candidates = candidates.filter(p => p.toLowerCase().includes(q));
   const sorted = [
     ...recentSet.filter(p => candidates.includes(p)),
     ...candidates.filter(p => !recentSet.includes(p))
   ];
-
   if (!sorted.length && !q) { el.style.display = 'none'; return; }
-
   let html = sorted.map(p =>
-    `<div onclick="selectProj('${p.replace(/'/g,"\\'")}')"
+    `<div onclick="selectProj('${p.replace(/'/g,"\'")}')"
       style="padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,.06)"
       onmouseover="this.style.background='#f5f5f3'" onmouseout="this.style.background=''">${p}</div>`
   ).join('');
-
-  if (!master.projects.some(p => p.toLowerCase() === q)) {
-    html += `<div onclick="addProjAndSelect('${q.replace(/'/g,"\\'")}')"
+  if (q && !master.projects.some(p => p.toLowerCase() === q)) {
+    html += `<div onclick="addProjAndSelect('${q.replace(/'/g,"\'")}')"
       style="padding:6px 10px;font-size:12px;cursor:pointer;color:#185fa5;background:#e6f1fb">
       <i class="ti ti-plus" aria-hidden="true"></i> 「${q}」を新規登録して選択
     </div>`;
   }
-
   el.innerHTML = html;
   el.style.display = 'block';
 }
@@ -1168,27 +1132,6 @@ async function savePaid() {
   } catch(e) { hideLoading(); showError(e.message); }
 }
 
-function calcKintaiTime() {
-  const s = document.getElementById('mk-s').value;
-  const e = document.getElementById('mk-e').value;
-  const b = parseInt(document.getElementById('mk-b').value) || 60;
-  const el = document.getElementById('mk-calc');
-  const sub = document.getElementById('mk-calc-sub');
-  if (!el) return;
-  if (!s || !e) { el.textContent = '—'; sub.textContent = ''; return; }
-  const sh = parseInt(s)*60 + parseInt(s.slice(3));
-  const eh = parseInt(e)*60 + parseInt(e.slice(3));
-  const total = Math.max(0, eh - sh - b);
-  const h = Math.floor(total/60);
-  const m = total % 60;
-  el.textContent = `${h}時間${m>0?m+'分':''}`;
-  const over = total - 8*60;
-  sub.textContent = over > 0
-    ? `（所定+${Math.floor(over/60)}時間${over%60>0?over%60+'分':''}）`
-    : over < 0 ? `（所定-${Math.floor(Math.abs(over)/60)}時間${Math.abs(over)%60>0?Math.abs(over)%60+'分':''}）` : '（所定通り）';
-  sub.style.color = over > 0 ? '#a32d2d' : over < 0 ? '#0f6e56' : '#888';
-}
-   
 function hm(id) { document.getElementById(id).style.display = 'none'; }
 
 // ============================================================
@@ -1814,7 +1757,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <h3>タスクマスタ</h3>
       <div class="mlist" id="task-mlist"></div>
       <div class="ar">
-        <div style="position:relative;display:inline-block">   <input type="text" id="ntp-input" placeholder="案件名で絞り込み..."     style="width:160px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px"     oninput="filterNtpSuggest()" onfocus="filterNtpSuggest()" onblur="setTimeout(()=>hideNtpSuggest(),200)">   <input type="hidden" id="ntp" value="">   <div id="ntp-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1);min-width:200px"></div> </div>
+        <select id="ntp" style="width:130px"><option value="">案件</option></select>
         <input type="text" id="ntn" placeholder="タスク名..." style="max-width:150px">
         <button class="btn btn-sm" onclick="addTaskM()"><i class="ti ti-plus"></i></button>
       </div>
@@ -1834,19 +1777,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <h3 id="mk-t">勤怠入力</h3>
   <div class="fr"><label>日付</label><input type="date" id="mk-d"></div>
   <div class="fr"><label>区分</label><select id="mk-type"><option value="work">出勤</option><option value="paid">有給</option><option value="half">半休</option><option value="holiday">祝日</option><option value="remote">在宅</option></select></div>
-  <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s" oninput="calcKintaiTime()"><input type="time" id="mk-e" oninput="calcKintaiTime()"></div></div>
+  <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s"><input type="time" id="mk-e"></div></div>
   <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15"></div>
-<div class="fr">
+  <div class="fr">
   <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">勤務地（複数選択可）</label>
   <div style="display:flex;gap:12px;flex-wrap:wrap">
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-r" style="width:auto"> 在宅</label>
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-trip" style="width:auto"> 出張</label>
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-umeda" style="width:auto"> 梅田支店</label>
   </div>
-</div>
-<div style="background:#f5f5f3;border-radius:8px;padding:.625rem .875rem;font-size:12px;color:#888;margin-bottom:4px">
-  稼働時間：<strong id="mk-calc" style="color:#1a1a18;font-size:14px">—</strong>
-  <span style="font-size:11px;margin-left:8px" id="mk-calc-sub"></span>
 </div>
   <div class="mbtns">
     <button class="btn btn-d" id="mk-del" onclick="delK()" style="display:none;margin-right:auto">削除</button>
@@ -1857,43 +1796,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 
 <!-- Task Modal -->
 <div id="mt" class="mo" style="display:none" onclick="if(event.target===this)hm('mt')">
-<div class="mc" onclick="event.stopPropagation()" style="max-width:520px">
+<div class="mc" onclick="event.stopPropagation()">
   <h3 id="mt-t">工数入力</h3>
   <div class="fr"><label>日付</label><input type="date" id="mt-d"></div>
-  <div style="margin-bottom:8px">
-    <div style="font-size:11px;color:#888;margin-bottom:4px">テンプレート</div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center" id="tpl-btn-list">
-      <span style="font-size:11px;color:#aaa">読み込み中...</span>
-    </div>
-  </div>
   <div class="tel" id="tel"></div>
-  <div style="background:#f5f5f3;border-radius:8px;padding:.75rem;margin-bottom:8px">
-    <div style="font-size:11px;color:#888;margin-bottom:6px">エントリー追加</div>
-    <div style="position:relative;margin-bottom:6px">
-      <input type="text" id="ta-proj-input" placeholder="案件名（入力で絞り込み）"
-        style="width:100%;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:5px 8px"
-        oninput="filterProjSuggest()" onfocus="filterProjSuggest()" onblur="setTimeout(()=>hideProjSuggest(),200)">
-      <div id="proj-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
-    </div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
-      <select id="ta-task" style="flex:1;min-width:110px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">タスク</option></select>
-      <select id="ta-biz" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">事業区分</option></select>
-      <select id="ta-work" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">作業区分</option></select>
-    </div>
-    <div style="display:flex;gap:5px;align-items:center">
-      <div class="hs" style="flex-shrink:0"><button onclick="adjNH(-0.5)">−</button><span id="nh-val">0.5</span><button onclick="adjNH(0.5)">＋</button></div>
-      <span style="font-size:11px;color:#888">H</span>
-      <button class="btn btn-sm" onclick="addTE()" style="margin-left:auto"><i class="ti ti-plus"></i> 追加</button>
-    </div>
-    <div style="margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.08);display:flex;gap:5px;align-items:center">
-      <input type="text" id="tpl-save-name" placeholder="テンプレ名（案件名省略可）"
-        style="flex:1;font-size:11px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px">
-      <button class="btn btn-sm" onclick="saveCurrentAsTemplate()" style="font-size:10px;white-space:nowrap">
-        <i class="ti ti-bookmark"></i> 保存
-      </button>
-    </div>
+  <div class="tadd-row">
+    <select id="ta-proj" onchange="updTS()" style="flex:1;min-width:110px"><option value="">案件</option></select>
+    <select id="ta-task" style="flex:1;min-width:110px"><option value="">タスク</option></select>
+    <div class="hs"><button onclick="adjNH(-0.5)">−</button><span id="nh-val">0.5</span><button onclick="adjNH(0.5)">＋</button></div>
+    <button class="btn btn-sm" onclick="addTE()"><i class="ti ti-plus"></i></button>
   </div>
-  <div style="font-size:11px;color:#888">合計: <strong id="mt-tot">0</strong> H &nbsp;／&nbsp; 直前を複製: <button class="btn btn-sm" onclick="duplicateLastEntry()" style="font-size:10px;padding:2px 8px"><i class="ti ti-copy"></i></button></div>
+  <div style="font-size:11px;color:#888;margin-top:5px">合計: <strong id="mt-tot">0</strong> H</div>
   <div class="mbtns"><button class="btn" onclick="hm('mt')">キャンセル</button><button class="btn btn-p" onclick="saveT()">保存</button></div>
 </div></div>
 
