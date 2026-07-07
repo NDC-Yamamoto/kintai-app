@@ -95,7 +95,7 @@ async function apiDeleteAccount(id) {
 async function apiFetchKintai(userId, year, month) {
   const from = `${year}-${String(month).padStart(2,'0')}-01`;
   const lastDay = new Date(year, month, 0).getDate();
-const to = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+  const to   = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
   const { data } = await sb.from('kintai_records')
     .select('*').eq('user_id', userId).gte('date', from).lte('date', to);
   // { 'YYYY-MM-DD': record } の形に変換
@@ -135,7 +135,7 @@ async function apiDeleteKintai(userId, date) {
 async function apiFetchTasks(userId, year, month) {
   const from = `${year}-${String(month).padStart(2,'0')}-01`;
   const lastDay = new Date(year, month, 0).getDate();
-const to = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+  const to   = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
   const { data } = await sb.from('task_entries')
     .select('*').eq('user_id', userId).gte('date', from).lte('date', to).order('date');
   // { 'YYYY-MM-DD': [{proj,task,h,id}] } の形に変換
@@ -178,7 +178,7 @@ async function apiAddPaidUsage(grantId, userId, date, days) {
 /** マスタ **/
 async function apiFetchMaster() {
   const [{ data: projs }, { data: tasks }] = await Promise.all([
-    sb.from('projects').select('id, name').order('id'),
+    sb.from('projects').select('id, name, biz_type, work_type').order('id'),
     sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id')
   ]);
   return {
@@ -188,8 +188,19 @@ async function apiFetchMaster() {
   };
 }
 
-async function apiAddProject(name) {
-  const { error } = await sb.from('projects').insert({ name, created_by: me?.id });
+async function apiAddProject(name, bizType, workType) {
+  const { error } = await sb.from('projects').insert({
+    name, created_by: me?.id,
+    biz_type: bizType || 'other',
+    work_type: workType || 'other'
+  });
+  if (error) throw error;
+}
+
+async function apiUpdateProject(name, bizType, workType) {
+  const { error } = await sb.from('projects')
+    .update({ biz_type: bizType, work_type: workType })
+    .eq('name', name);
   if (error) throw error;
 }
 
@@ -418,6 +429,16 @@ async function cm(d) {
     tasksCache[uid] = tsk;
   } catch(e) { showError(e.message); }
   hideLoading();
+  const a = document.querySelector('.section.active');
+  if (a) showTab(a.id.replace('sec-',''));
+}
+
+function goToday() {
+  const now = new Date();
+  curY = now.getFullYear();
+  curM = now.getMonth() + 1;
+  kintaiCache = {};
+  tasksCache = {};
   const a = document.querySelector('.section.active');
   if (a) showTab(a.id.replace('sec-',''));
 }
@@ -726,19 +747,59 @@ async function delAcct() {
 // ============================================================
 // マスタ
 // ============================================================
+const BIZ_LABELS = { direct:'直営', public:'公共', other:'その他' };
+const WORK_LABELS = { install:'導入', maintenance:'保守', other:'その他' };
+const BIZ_COLORS  = { direct:'#e6f1fb', public:'#eaf3de', other:'#f1efe8' };
+const WORK_COLORS = { install:'#faeeda', maintenance:'#eeedfe', other:'#f1efe8' };
+
 function renderMaster() {
-  document.getElementById('proj-list').innerHTML = master.projects.map((p,i) =>
-    `<div class="mtag">${p}<span class="x" onclick="delProj('${p}')">×</span></div>`
-  ).join('');
+  const raw = master.projectsRaw || [];
+  document.getElementById('proj-list').innerHTML = raw.map(p => {
+    const biz = p.biz_type || 'other';
+    const wrk = p.work_type || 'other';
+    return `<div style="display:flex;align-items:center;gap:5px;padding:4px 8px;border:0.5px solid rgba(0,0,0,.15);border-radius:8px;background:#f5f5f3;font-size:12px;margin-bottom:4px">
+      <span style="font-weight:500">${p.name}</span>
+      <span style="padding:1px 6px;border-radius:10px;font-size:10px;background:${BIZ_COLORS[biz]}">${BIZ_LABELS[biz]}</span>
+      <span style="padding:1px 6px;border-radius:10px;font-size:10px;background:${WORK_COLORS[wrk]}">${WORK_LABELS[wrk]}</span>
+      <span style="cursor:pointer;color:#aaa;font-size:11px;margin-left:2px" onclick="openEditProj('${p.name}','${biz}','${wrk}')"><i class="ti ti-edit"></i></span>
+      <span style="cursor:pointer;color:#aaa;font-size:13px" onclick="delProj('${p.name}')">×</span>
+    </div>`;
+  }).join('');
   document.getElementById('task-mlist').innerHTML = master.tasks.map((t,i) =>
     `<div class="mtag"><span style="color:var(--color-text-secondary);font-size:9px;margin-right:2px">${t.proj||''}</span>${t.name}<span class="x" onclick="delTaskM('${t.name}','${t.proj}')">×</span></div>`
   ).join('');
   document.getElementById('ntp').innerHTML = '<option value="">案件（任意）</option>' + master.projects.map(p => `<option value="${p}">${p}</option>`).join('');
 }
 
+function openEditProj(name, bizType, workType) {
+  document.getElementById('ep-name').value = name;
+  document.getElementById('ep-biz').value = bizType;
+  document.getElementById('ep-work').value = workType;
+  document.getElementById('ep-title').textContent = name + ' の分類設定';
+  document.getElementById('m-editproj').style.display = 'flex';
+}
+
+async function saveEditProj() {
+  const name = document.getElementById('ep-name').value;
+  const biz  = document.getElementById('ep-biz').value;
+  const work = document.getElementById('ep-work').value;
+  showLoading('保存中...');
+  try {
+    await apiUpdateProject(name, biz, work);
+    const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
+    hideLoading(); hm('m-editproj'); renderMaster();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
 async function addProj() {
   const v = document.getElementById('np').value.trim(); if(!v) return;
-  try { await apiAddProject(v); const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[]; document.getElementById('np').value=''; renderMaster(); }
+  const biz  = document.getElementById('np-biz').value;
+  const work = document.getElementById('np-work').value;
+  try {
+    await apiAddProject(v, biz, work);
+    const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
+    document.getElementById('np').value=''; renderMaster();
+  }
   catch(e) { showError(e.message); }
 }
 async function delProj(name) {
@@ -1419,7 +1480,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <div class="month-title" id="mt1"></div>
       <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
       <select class="vsel" id="cal-vsel" onchange="switchViewMember('cal-vsel')" style="display:none"></select>
-      <button class="btn btn-sm" onclick="openKM(null)" style="margin-left:auto"><i class="ti ti-plus"></i> 勤怠</button>
+      <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
+      <button class="btn btn-sm" onclick="openKM(null)"><i class="ti ti-plus"></i> 勤怠</button>
       <button class="btn btn-sm" onclick="openTM(null)"><i class="ti ti-plus"></i> 工数</button>
     </div>
     <table class="calendar"><thead><tr><th style="color:#E24B4A">日</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th style="color:#378ADD">土</th></tr></thead><tbody id="cal-body"></tbody></table>
@@ -1432,6 +1494,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <div class="month-title" id="mt2"></div>
       <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
       <select class="vsel" id="list-vsel" onchange="switchViewMember('list-vsel')" style="display:none"></select>
+      <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
     </div>
     <div class="stats-grid" id="stats-grid"></div>
     <table class="dt"><thead><tr><th>日付</th><th>区分</th><th>出社</th><th>退社</th><th>稼働</th><th>休憩</th><th>在宅</th><th>工数</th></tr></thead><tbody id="list-body"></tbody></table>
@@ -1444,6 +1507,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <div class="month-title" id="mt3"></div>
       <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
       <select class="vsel" id="wl-vsel" onchange="switchViewMember('wl-vsel')" style="display:none"></select>
+      <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
     </div>
     <div class="wlw"><table class="wlt" id="wl-table"></table></div>
   </div>
@@ -1486,7 +1550,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 
   <!-- Master -->
   <div id="sec-master" class="section">
-    <div class="msec"><h3>案件マスタ</h3><div class="mlist" id="proj-list"></div><div class="ar"><input type="text" id="np" placeholder="案件名..." style="max-width:190px"><button class="btn btn-sm" onclick="addProj()"><i class="ti ti-plus"></i></button></div></div>
+    <div class="msec">
+      <h3>案件マスタ</h3>
+      <div id="proj-list" style="margin-bottom:.625rem"></div>
+      <div style="display:flex;flex-wrap:wrap;gap:5px;align-items:center">
+        <input type="text" id="np" placeholder="案件名..." style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;width:160px">
+        <select id="np-biz" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px;background:#fff">
+          <option value="other">事業区分：その他</option>
+          <option value="direct">直営</option>
+          <option value="public">公共</option>
+        </select>
+        <select id="np-work" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px;background:#fff">
+          <option value="other">作業区分：その他</option>
+          <option value="install">導入</option>
+          <option value="maintenance">保守</option>
+        </select>
+        <button class="btn btn-sm" onclick="addProj()"><i class="ti ti-plus"></i> 追加</button>
+      </div>
+    </div>
     <div class="msec"><h3>タスクマスタ</h3><div class="mlist" id="task-mlist"></div><div class="ar"><select id="ntp" style="width:130px"><option value="">案件</option></select><input type="text" id="ntn" placeholder="タスク名..." style="max-width:150px"><button class="btn btn-sm" onclick="addTaskM()"><i class="ti ti-plus"></i></button></div></div>
   </div>
 </div>
@@ -1532,6 +1613,33 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <div class="fr"><label>取得日数</label><select id="mp-days"><option value="1">1日</option><option value="0.5">0.5日（半休）</option></select></div>
   <div class="fr"><label>付与年度</label><select id="mp-yr"></select></div>
   <div class="mbtns"><button class="btn" onclick="hm('mp')">キャンセル</button><button class="btn btn-p" onclick="savePaid()">保存</button></div>
+</div></div>
+
+<!-- Project Edit Modal -->
+<div id="m-editproj" class="mo" style="display:none" onclick="if(event.target===this)hm('m-editproj')">
+<div class="mc" onclick="event.stopPropagation()" style="max-width:360px">
+  <h3 id="ep-title">案件の分類設定</h3>
+  <input type="hidden" id="ep-name">
+  <div class="fr">
+    <label>事業区分</label>
+    <select id="ep-biz">
+      <option value="direct">直営</option>
+      <option value="public">公共</option>
+      <option value="other">その他</option>
+    </select>
+  </div>
+  <div class="fr">
+    <label>作業区分</label>
+    <select id="ep-work">
+      <option value="install">導入</option>
+      <option value="maintenance">保守</option>
+      <option value="other">その他</option>
+    </select>
+  </div>
+  <div class="mbtns">
+    <button class="btn" onclick="hm('m-editproj')">キャンセル</button>
+    <button class="btn btn-p" onclick="saveEditProj()">保存</button>
+  </div>
 </div></div>
 
 <!-- Account Modal -->
