@@ -94,7 +94,8 @@ async function apiDeleteAccount(id) {
 /** 勤怠 **/
 async function apiFetchKintai(userId, year, month) {
   const from = `${year}-${String(month).padStart(2,'0')}-01`;
-  const to   = `${year}-${String(month).padStart(2,'0')}-31`;
+  const lastDay = new Date(year, month, 0).getDate();
+const to = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
   const { data } = await sb.from('kintai_records')
     .select('*').eq('user_id', userId).gte('date', from).lte('date', to);
   // { 'YYYY-MM-DD': record } の形に変換
@@ -133,7 +134,8 @@ async function apiDeleteKintai(userId, date) {
 /** 工数 **/
 async function apiFetchTasks(userId, year, month) {
   const from = `${year}-${String(month).padStart(2,'0')}-01`;
-  const to   = `${year}-${String(month).padStart(2,'0')}-31`;
+  const lastDay = new Date(year, month, 0).getDate();
+const to = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
   const { data } = await sb.from('task_entries')
     .select('*').eq('user_id', userId).gte('date', from).lte('date', to).order('date');
   // { 'YYYY-MM-DD': [{proj,task,h,id}] } の形に変換
