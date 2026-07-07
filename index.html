@@ -94,8 +94,7 @@ async function apiDeleteAccount(id) {
 /** 勤怠 **/
 async function apiFetchKintai(userId, year, month) {
   const from = `${year}-${String(month).padStart(2,'0')}-01`;
-  const lastDay = new Date(year, month, 0).getDate();
-const to = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+  const to   = `${year}-${String(month).padStart(2,'0')}-31`;
   const { data } = await sb.from('kintai_records')
     .select('*').eq('user_id', userId).gte('date', from).lte('date', to);
   // { 'YYYY-MM-DD': record } の形に変換
@@ -134,8 +133,7 @@ async function apiDeleteKintai(userId, date) {
 /** 工数 **/
 async function apiFetchTasks(userId, year, month) {
   const from = `${year}-${String(month).padStart(2,'0')}-01`;
-  const lastDay = new Date(year, month, 0).getDate();
-const to = `${year}-${String(month).padStart(2,'0')}-${String(lastDay).padStart(2,'0')}`;
+  const to   = `${year}-${String(month).padStart(2,'0')}-31`;
   const { data } = await sb.from('task_entries')
     .select('*').eq('user_id', userId).gte('date', from).lte('date', to).order('date');
   // { 'YYYY-MM-DD': [{proj,task,h,id}] } の形に変換
@@ -356,6 +354,7 @@ function buildTabs() {
     { id:'calendar',  icon:'ti-calendar',          label:'カレンダー',     show:true },
     { id:'list',      icon:'ti-table',             label:'集計',           show:true },
     { id:'workload',  icon:'ti-chart-bar',          label:'工数',           show:true },
+    { id:'insight',   icon:'ti-bulb',               label:'インサイト',     show:true },
     { id:'paid',      icon:'ti-leaf',              label:'有給',           show:true },
     { id:'admin',     icon:'ti-users',             label:'チーム',         show:isAdmin()||isSub() },
     { id:'accounts',  icon:'ti-user-cog',          label:'アカウント',     show:isAdmin() },
@@ -395,6 +394,7 @@ function showTab(id) {
     admin:     renderAdmin,
     accounts:  renderAccounts,
     master:    renderMaster,
+    insight:   renderInsight,
   };
   if (renderers[id]) renderers[id]();
 }
@@ -416,16 +416,6 @@ async function cm(d) {
     tasksCache[uid] = tsk;
   } catch(e) { showError(e.message); }
   hideLoading();
-  const a = document.querySelector('.section.active');
-  if (a) showTab(a.id.replace('sec-',''));
-}
-
-   function goToday() {
-  const now = new Date();
-  curY = now.getFullYear();
-  curM = now.getMonth() + 1;
-  kintaiCache = {};
-  tasksCache = {};
   const a = document.querySelector('.section.active');
   if (a) showTab(a.id.replace('sec-',''));
 }
@@ -909,19 +899,369 @@ async function savePaid() {
 function hm(id) { document.getElementById(id).style.display = 'none'; }
 
 // ============================================================
+// インサイト
+// ============================================================
+async function renderInsight() {
+  showLoading('データを分析中...');
+  const uid = me.id;
+  try {
+    // 全期間データを取得
+    const { data: allKintai } = await sb.from('kintai_records')
+      .select('*').eq('user_id', uid).order('date');
+    if (!allKintai || !allKintai.length) {
+      document.getElementById('insight-content').innerHTML =
+        '<div style="color:#888;font-size:13px;padding:2rem 0">勤怠データがありません</div>';
+      hideLoading(); return;
+    }
+
+    // 月ごとに集計
+    const monthMap = {};
+    allKintai.forEach(r => {
+      const ym = r.date.slice(0,7);
+      if (!monthMap[ym]) monthMap[ym] = { records:[], workDays:0, totalH:0, remDays:0, tripDays:0, over20:0 };
+      const m = monthMap[ym];
+      m.records.push(r);
+      if (r.type === 'work' || r.type === 'remote' || r.type === 'half') {
+        if (r.start_time && r.end_time) {
+          const s = r.start_time.slice(0,5), e = r.end_time.slice(0,5);
+          const sh = parseInt(s)*60+parseInt(s.slice(3));
+          const eh = parseInt(e)*60+parseInt(e.slice(3));
+          const bk = (r.break_min||60);
+          const h = Math.max(0, (eh - sh - bk) / 60);
+          m.totalH += h; m.workDays++;
+          if (r.is_remote) m.remDays++;
+          if (parseInt(e) >= 20*60) m.over20++;
+        }
+      }
+    });
+
+    const months = Object.keys(monthMap).sort();
+    const now = new Date();
+    const curYM = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+    const latestYM = months[months.length-1];
+    const curMo = monthMap[latestYM];
+
+    // 今月サマリー
+    const soH = curMo.workDays * 8;
+    const overtimeH = Math.max(0, curMo.totalH - soH).toFixed(1);
+    const maxRec = curMo.records.filter(r=>r.start_time&&r.end_time).reduce((a,b)=>{
+      const hA = (parseInt(a.end_time)*60+parseInt(a.end_time.slice(3))-parseInt(a.start_time)*60-parseInt(a.start_time.slice(3))-(a.break_min||60))/60;
+      const hB = (parseInt(b.end_time)*60+parseInt(b.end_time.slice(3))-parseInt(b.start_time)*60-parseInt(b.start_time.slice(3))-(b.break_min||60))/60;
+      return hA>hB?a:b;
+    }, {start_time:'00:00',end_time:'00:00',break_min:60,date:''});
+
+    // アラート生成
+    const alerts = [];
+    const last3 = months.slice(-4,-1).map(ym=>monthMap[ym]);
+    if (last3.length===3 && last3[0].totalH < last3[1].totalH && last3[1].totalH < last3[2].totalH) {
+      alerts.push({type:'warn', icon:'ti-trending-up', msg:`<strong>稼働時間が増加傾向です。</strong> 直近3ヶ月で連続増加しています。`});
+    }
+    if (curMo.over20 >= 5) {
+      alerts.push({type:'warn', icon:'ti-moon', msg:`<strong>20時以降の退社が${curMo.over20}日あります。</strong> 夜間稼働が目立ちます。`});
+    }
+    const hasWeekend = allKintai.some(r=>{
+      const wd=new Date(r.date).getDay();
+      return (wd===0||wd===6)&&r.start_time;
+    });
+    if (!hasWeekend) {
+      alerts.push({type:'ok', icon:'ti-sun', msg:`<strong>休日出勤なし。</strong> オンオフのメリハリが保てています。`});
+    }
+    if (curMo.remDays >= 3) {
+      alerts.push({type:'info', icon:'ti-home', msg:`<strong>今月の在宅勤務は${curMo.remDays}日です。</strong>`});
+    }
+
+    const alertHTML = alerts.map(a=>
+      `<div style="display:flex;align-items:flex-start;gap:10px;padding:.75rem 1rem;border-radius:8px;border:0.5px solid;margin-bottom:6px;${
+        a.type==='warn'?'border-color:#f09595;background:#fcebeb;color:#791f1f':
+        a.type==='ok'  ?'border-color:#5dcaa5;background:#e1f5ee;color:#085041':
+                        'border-color:#85b7eb;background:#e6f1fb;color:#0c447c'}">
+        <i class="ti ${a.icon}" style="font-size:15px;flex-shrink:0;margin-top:1px"></i>
+        <p style="font-size:12px;line-height:1.5;margin:0">${a.msg}</p>
+      </div>`
+    ).join('');
+
+    // ヒートマップ
+    const hmCells = buildHmCells(allKintai);
+
+    // 月次棒グラフデータ
+    const barData = months.map(ym => ({
+      label: ym.slice(2).replace('-','/'),
+      total: Math.round(monthMap[ym].totalH),
+      so: monthMap[ym].workDays * 8
+    }));
+
+    document.getElementById('insight-content').innerHTML = `
+      <div style="padding:.5rem 0">
+        <div style="font-size:12px;font-weight:500;color:#888;margin-bottom:.5rem">今月のサマリー（${latestYM.replace('-','年')}月）</div>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:1.25rem">
+          ${[
+            ['稼働日数', curMo.workDays+'日', ''],
+            ['超過稼働', overtimeH+'H', overtimeH>20?'color:#a32d2d':''],
+            ['20時以降退社', curMo.over20+'日', curMo.over20>=5?'color:#a32d2d':''],
+            ['在宅勤務', curMo.remDays+'日', '']
+          ].map(([l,v,s])=>`
+            <div style="background:#f5f5f3;border-radius:8px;padding:.875rem">
+              <div style="font-size:11px;color:#888;margin-bottom:4px">${l}</div>
+              <div style="font-size:20px;font-weight:500;${s}">${v}</div>
+            </div>`).join('')}
+        </div>
+
+        ${alerts.length ? `<div style="font-size:12px;font-weight:500;color:#888;margin-bottom:.5rem">気になるポイント</div>${alertHTML}` : ''}
+
+        <div style="font-size:12px;font-weight:500;color:#888;margin:.875rem 0 .375rem">稼働カレンダー（直近1年）</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">濃いほど長時間稼働 / グレーは休日</div>
+        <div id="hm-container">${hmCells}</div>
+        <div style="display:flex;align-items:center;gap:5px;margin-top:7px;font-size:11px;color:#888">
+          少ない
+          ${['#e6f1fb','#85b7eb','#378add','#0c447c'].map(c=>`<div style="width:13px;height:13px;border-radius:2px;background:${c}"></div>`).join('')}
+          多い
+        </div>
+
+        <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">月次稼働時間（全期間）</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">灰線＝所定労働時間（稼働日数×8H）</div>
+        <svg id="bar-chart-svg" viewBox="0 0 640 160" style="width:100%;display:block" preserveAspectRatio="none"></svg>
+
+        <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">日別稼働時間</div>
+        <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:.75rem" id="ins-month-btns"></div>
+        <svg id="daily-chart-svg" viewBox="0 0 640 110" style="width:100%;display:block" preserveAspectRatio="none"></svg>
+        <div style="font-size:11px;color:#888;margin-top:.375rem" id="ins-daily-summary"></div>
+
+        <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">在宅 / 出張（月別）</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+          <div style="background:#f5f5f3;border-radius:8px;padding:.875rem">
+            <div style="font-size:12px;font-weight:500;margin-bottom:.625rem"><i class="ti ti-home" style="margin-right:4px"></i>在宅勤務</div>
+            ${months.slice(-6).map(ym=>{
+              const d=monthMap[ym].remDays;
+              const max=Math.max(...months.slice(-6).map(m=>monthMap[m].remDays),1);
+              return`<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;font-size:11px">
+                <div style="min-width:32px;color:#888;text-align:right">${ym.slice(5)}月</div>
+                <div style="flex:1;background:#e1e0d9;border-radius:3px;height:8px;overflow:hidden"><div style="width:${Math.round(d/max*100)}%;height:100%;background:#7f77dd;border-radius:3px"></div></div>
+                <div style="min-width:20px;font-weight:500">${d}日</div>
+              </div>`;
+            }).join('')}
+          </div>
+          <div style="background:#f5f5f3;border-radius:8px;padding:.875rem">
+            <div style="font-size:12px;font-weight:500;margin-bottom:.625rem"><i class="ti ti-plane" style="margin-right:4px"></i>出張</div>
+            <div style="font-size:11px;color:#888;padding:1rem 0;text-align:center">出張データは勤務地「出」の<br>記録から自動集計されます</div>
+          </div>
+        </div>
+      </div>`;
+
+    // 棒グラフ描画
+    drawBarChart(barData);
+    // 日別グラフ
+    insMonthData = monthMap;
+    insMonths = months;
+    buildInsMonthBtns(months, monthMap);
+    drawDailyChart(latestYM, monthMap[latestYM].records);
+
+  } catch(e) {
+    document.getElementById('insight-content').innerHTML =
+      `<div style="color:#a32d2d;font-size:13px">エラー: ${e.message}</div>`;
+  }
+  hideLoading();
+}
+
+let insMonthData = {}, insMonths = [];
+
+function buildHmCells(records) {
+  const recMap = {};
+  records.forEach(r => {
+    if (r.start_time && r.end_time) {
+      const s=r.start_time.slice(0,5),e=r.end_time.slice(0,5);
+      const sh=parseInt(s)*60+parseInt(s.slice(3));
+      const eh=parseInt(e)*60+parseInt(e.slice(3));
+      const h=Math.max(0,(eh-sh-(r.break_min||60))/60);
+      recMap[r.date] = h;
+    } else {
+      recMap[r.date] = 0;
+    }
+  });
+
+  function hmColor(h) {
+    if (h <= 0) return '#e1e0d9';
+    if (h < 7)  return '#e6f1fb';
+    if (h < 8)  return '#b5d4f4';
+    if (h < 9)  return '#85b7eb';
+    if (h < 10) return '#378add';
+    if (h < 11) return '#185fa5';
+    return '#0c447c';
+  }
+
+  const today = new Date();
+  const start = new Date(today.getFullYear()-1, today.getMonth(), today.getDate());
+  let cur = new Date(start);
+  const dow = cur.getDay();
+  cur.setDate(cur.getDate() - (dow === 0 ? 6 : dow - 1));
+
+  const weeks = []; let week = [];
+  while (cur <= today || week.length) {
+    const d = new Date(cur);
+    const inRange = d >= start && d <= today;
+    const dk = d.toISOString().slice(0,10);
+    const h = recMap[dk] ?? -1;
+    week.push({ d, inRange, h });
+    cur.setDate(cur.getDate()+1);
+    if (week.length === 7 || (cur > today && week.length)) { weeks.push(week); week=[]; }
+  }
+
+  let lastM=-1, mRow='', cols='';
+  weeks.forEach(wk => {
+    const m = wk[0].d.getMonth();
+    if (m !== lastM) {
+      mRow += `<div style="width:16px;font-size:10px;color:#aaa">${m+1}月</div>`;
+      lastM = m;
+    } else {
+      mRow += `<div style="width:16px"></div>`;
+    }
+    let col = '';
+    wk.forEach(day => {
+      const bg = day.inRange && day.h >= 0 ? hmColor(day.h) : 'transparent';
+      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" title="${day.inRange?day.d.toISOString().slice(0,10)+(day.h>0?' '+day.h.toFixed(1)+'H':''):''}"></div>`;
+    });
+    cols += `<div style="display:flex;flex-direction:column;gap:3px">${col}</div>`;
+  });
+
+  return `<div style="display:flex;align-items:flex-start">
+    <div style="display:flex;flex-direction:column;gap:3px;margin-right:5px;padding-top:20px">
+      ${['月','','水','','金','','日'].map(d=>`<div style="font-size:9px;color:#aaa;height:13px;display:flex;align-items:center">${d}</div>`).join('')}
+    </div>
+    <div>
+      <div style="display:flex;gap:3px;margin-bottom:4px">${mRow}</div>
+      <div style="display:flex;gap:3px">${cols}</div>
+    </div>
+  </div>`;
+}
+
+function drawBarChart(barData) {
+  const svg = document.getElementById('bar-chart-svg');
+  if (!svg) return;
+  const W=640,H=160,pL=40,pR=10,pT=14,pB=32;
+  const cW=W-pL-pR, cH=H-pT-pB;
+  const allV = barData.flatMap(d=>[d.total,d.so]);
+  const maxV=Math.max(...allV)+10, minV=Math.max(0,Math.min(...allV)-10);
+  const yS=v=>pT+(1-(v-minV)/(maxV-minV))*cH;
+  const n=barData.length, barW=cW/n;
+  let html='';
+
+  [140,160,180,200].forEach(v=>{
+    if(v<minV||v>maxV)return;
+    const y=yS(v);
+    html+=`<line x1="${pL}" y1="${y}" x2="${W-pR}" y2="${y}" stroke="#e1e0d9" stroke-width="0.5"/>`;
+    html+=`<text x="${pL-3}" y="${y+3}" font-size="9" fill="#aaa" text-anchor="end">${v}</text>`;
+  });
+
+  barData.forEach((d,i)=>{
+    const x=pL+i*barW+barW*0.1;
+    const bw=barW*0.8;
+    const y=yS(d.total);
+    const bh=pT+cH-y;
+    html+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="#378add" rx="2" opacity="0.8"/>`;
+    if(n<=12||(i%3===0||i===n-1)){
+      html+=`<text x="${x+bw/2}" y="${H-pB+13}" font-size="8" fill="#aaa" text-anchor="middle">${d.label}</text>`;
+    }
+  });
+
+  // 所定ライン
+  let lp='';
+  barData.forEach((d,i)=>{
+    const x=pL+i*barW+barW/2;
+    const y=yS(d.so);
+    lp+=(i===0?`M ${x} ${y}`:`L ${x} ${y}`);
+  });
+  html+=`<path d="${lp}" fill="none" stroke="#888" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="4,3"/>`;
+  barData.forEach((d,i)=>{
+    const x=pL+i*barW+barW/2;
+    const y=yS(d.so);
+    html+=`<circle cx="${x}" cy="${y}" r="2" fill="#888"/>`;
+  });
+
+  svg.innerHTML=html;
+}
+
+function buildInsMonthBtns(months, monthMap) {
+  const wrap = document.getElementById('ins-month-btns');
+  if (!wrap) return;
+  wrap.innerHTML='';
+  const show = months.slice(-12);
+  show.forEach((ym,i)=>{
+    const btn=document.createElement('button');
+    btn.textContent=ym.slice(2).replace('-','/');
+    btn.style.cssText='padding:3px 8px;font-size:11px;border-radius:8px;border:0.5px solid #ddd;background:#f5f5f3;color:#888;cursor:pointer';
+    btn.onclick=()=>{
+      wrap.querySelectorAll('button').forEach(b=>{b.style.background='#f5f5f3';b.style.color='#888';});
+      btn.style.background='#1a1a18';btn.style.color='#fff';
+      drawDailyChart(ym, monthMap[ym].records);
+    };
+    if(i===show.length-1){btn.style.background='#1a1a18';btn.style.color='#fff';}
+    wrap.appendChild(btn);
+  });
+}
+
+function drawDailyChart(ym, records) {
+  const svg = document.getElementById('daily-chart-svg');
+  if (!svg) return;
+  const W=640,H=110,pL=32,pR=10,pT=8,pB=26;
+  const cW=W-pL-pR, cH=H-pT-pB;
+
+  const days = records.filter(r=>r.start_time&&r.end_time).map(r=>{
+    const s=r.start_time.slice(0,5),e=r.end_time.slice(0,5);
+    const sh=parseInt(s)*60+parseInt(s.slice(3));
+    const eh=parseInt(e)*60+parseInt(e.slice(3));
+    const h=Math.max(0,(eh-sh-(r.break_min||60))/60);
+    return {d:parseInt(r.date.slice(8)),h:Math.round(h*10)/10};
+  }).sort((a,b)=>a.d-b.d);
+
+  if (!days.length) { svg.innerHTML=''; return; }
+
+  const maxH=Math.max(...days.map(d=>d.h),10), minH=5;
+  const xS=i=>pL+i/(days.length-1||1)*cW;
+  const yS=h=>pT+(1-(h-minH)/(maxH-minH))*cH;
+  const base=yS(8);
+  let html='';
+
+  html+=`<rect x="${pL}" y="${pT}" width="${cW}" height="${base-pT}" fill="#fcebeb" opacity="0.4"/>`;
+  html+=`<line x1="${pL}" y1="${base}" x2="${W-pR}" y2="${base}" stroke="#888" stroke-width="1" stroke-dasharray="4,3"/>`;
+  html+=`<text x="${pL-2}" y="${base+3}" font-size="9" fill="#888" text-anchor="end">8H</text>`;
+
+  let fillD='',pathD='';
+  days.forEach((d,i)=>{
+    const x=xS(i),y=yS(d.h);
+    if(i===0){pathD+=`M ${x} ${y}`;fillD+=`M ${x} ${pT+cH} L ${x} ${y}`;}
+    else{pathD+=` L ${x} ${y}`;fillD+=` L ${x} ${y}`;}
+    if(i===days.length-1)fillD+=` L ${x} ${pT+cH} Z`;
+  });
+  html+=`<path d="${fillD}" fill="#378add" opacity="0.1"/>`;
+  html+=`<path d="${pathD}" fill="none" stroke="#378add" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round"/>`;
+
+  days.forEach((d,i)=>{
+    const x=xS(i),y=yS(d.h),over=d.h>8;
+    html+=`<circle cx="${x}" cy="${y}" r="3.5" fill="${over?'#e24b4a':'#378add'}" stroke="white" stroke-width="1.5"/>`;
+    if(days.length<=15||i%3===0||i===days.length-1){
+      html+=`<text x="${x}" y="${H-pB+13}" font-size="8" fill="#aaa" text-anchor="middle">${d.d}</text>`;
+    }
+  });
+
+  svg.innerHTML=html;
+
+  const overDays=days.filter(d=>d.h>8).length;
+  const avgH=(days.reduce((s,d)=>s+d.h,0)/days.length).toFixed(1);
+  const maxDay=days.reduce((a,b)=>a.h>b.h?a:b);
+  const el=document.getElementById('ins-daily-summary');
+  if(el) el.textContent=`稼働日数 ${days.length}日 ／ 平均 ${avgH}H ／ 8H超過 ${overDays}日 ／ 最長 ${maxDay.h.toFixed(1)}H（${maxDay.d}日）`;
+}
+
+
+
+// ============================================================
 // 起動（セッション復元）
 // ============================================================
 window.addEventListener('load', async () => {
-  try {
-    const { data: { session } } = await sb.auth.getSession();
-    if (session) {
-      me = await apiGetMe();
-      if (me) { await initApp(); return; }
-    }
-  } catch(e) {
-    console.error('Session error:', e);
+  const { data: { session } } = await sb.auth.getSession();
+  if (session) {
+    me = await apiGetMe();
+    if (me) { await initApp(); return; }
   }
-  hideLoading();
   document.getElementById('pg-login').style.display = 'flex';
 });
 </script>
@@ -1073,10 +1413,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <!-- Calendar -->
   <div id="sec-calendar" class="section">
     <div class="month-nav">
-<button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
-<div class="month-title" id="mt1"></div>
-<button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
-<button class="btn btn-sm" onclick="goToday()" style="font-size:11px">今月</button>
+      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+      <div class="month-title" id="mt1"></div>
+      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
       <select class="vsel" id="cal-vsel" onchange="switchViewMember('cal-vsel')" style="display:none"></select>
       <button class="btn btn-sm" onclick="openKM(null)" style="margin-left:auto"><i class="ti ti-plus"></i> 勤怠</button>
       <button class="btn btn-sm" onclick="openTM(null)"><i class="ti ti-plus"></i> 工数</button>
@@ -1105,6 +1444,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <select class="vsel" id="wl-vsel" onchange="switchViewMember('wl-vsel')" style="display:none"></select>
     </div>
     <div class="wlw"><table class="wlt" id="wl-table"></table></div>
+  </div>
+
+  <!-- Insight -->
+  <div id="sec-insight" class="section">
+    <div id="insight-content"></div>
   </div>
 
   <!-- Paid -->
