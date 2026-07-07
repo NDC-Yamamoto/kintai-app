@@ -1063,9 +1063,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <!-- Calendar -->
   <div id="sec-calendar" class="section">
     <div class="month-nav">
-      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
-      <div class="month-title" id="mt1"></div>
-      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+<button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+<div class="month-title" id="mt1"></div>
+<button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+<button class="btn btn-sm" onclick="goToday()" style="font-size:11px">今月</button>
       <select class="vsel" id="cal-vsel" onchange="switchViewMember('cal-vsel')" style="display:none"></select>
       <button class="btn btn-sm" onclick="openKM(null)" style="margin-left:auto"><i class="ti ti-plus"></i> 勤怠</button>
       <button class="btn btn-sm" onclick="openTM(null)"><i class="ti ti-plus"></i> 工数</button>
