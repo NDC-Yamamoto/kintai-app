@@ -1022,6 +1022,34 @@ function filterProjSuggest() {
   el.style.display = 'block';
 }
 
+function filterNtpSuggest() {
+  const q = document.getElementById('ntp-input').value.trim().toLowerCase();
+  const el = document.getElementById('ntp-suggest');
+  if (!q) { el.style.display = 'none'; return; }
+  const candidates = [...master.projects]
+    .sort((a, b) => a.localeCompare(b, 'ja'))
+    .filter(p => p.toLowerCase().includes(q));
+  let html = candidates.map(p =>
+    `<div onclick="selectNtp('${p.replace(/'/g,"\\'")}')"
+      style="padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,.06)"
+      onmouseover="this.style.background='#f5f5f3'" onmouseout="this.style.background=''">${p}</div>`
+  ).join('');
+  if (!html) html = '<div style="padding:6px 10px;font-size:12px;color:#aaa">見つかりません</div>';
+  el.innerHTML = html;
+  el.style.display = 'block';
+}
+
+function selectNtp(name) {
+  document.getElementById('ntp-input').value = name;
+  document.getElementById('ntp').value = name;
+  hideNtpSuggest();
+}
+
+function hideNtpSuggest() {
+  const el = document.getElementById('ntp-suggest');
+  if (el) el.style.display = 'none';
+}
+   
 function selectProj(name) {
   document.getElementById('ta-proj-input').value = name;
   hideProjSuggest();
@@ -1804,7 +1832,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <h3>タスクマスタ</h3>
       <div class="mlist" id="task-mlist"></div>
       <div class="ar">
-        <select id="ntp" style="width:130px"><option value="">案件</option></select>
+        <div style="position:relative;display:inline-block">   <input type="text" id="ntp-input" placeholder="案件名で絞り込み..."     style="width:180px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px"     oninput="filterNtpSuggest()" onfocus="filterNtpSuggest()" onblur="setTimeout(()=>hideNtpSuggest(),200)">   <input type="hidden" id="ntp" value="">   <div id="ntp-suggest" style="display:none;position:absolute;top:100%;left:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1);min-width:200px"></div> </div>
         <input type="text" id="ntn" placeholder="タスク名..." style="max-width:150px">
         <button class="btn btn-sm" onclick="addTaskM()"><i class="ti ti-plus"></i></button>
       </div>
