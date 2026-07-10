@@ -1814,18 +1814,57 @@ async function renderBalance() {
     data.forEach(d=>{if(mMap[d.ym])mMap[d.ym][d.work]+=d.h;});
     const maxM=Math.max(...months.map(m=>Object.values(mMap[m]).reduce((s,v)=>s+v,0)))||1;
     const barW=cW/Math.max(months.length,1);
+    const barInfoStack=[];
     let html='';
     months.forEach((m,i)=>{
       const x=pL+i*barW+barW*0.1;const bw=barW*0.8;let y=pT+cH;
+      const total=Math.round(Object.values(mMap[m]).reduce((s,v)=>s+v,0)*10)/10;
+      const segs=[];
       [...WORKS].reverse().forEach(work=>{
         const h=mMap[m][work]||0;if(!h)return;
         const bh=Math.max(1,h/maxM*cH);y-=bh;
-        html+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${WORK_COLOR[work]||'#888'}" opacity="0.85" rx="1"/>`;
+        html+=`<rect class="bal-bar-seg" x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${WORK_COLOR[work]||'#888'}" opacity="0.85" rx="1"
+          data-ym="${m}" data-work="${work}" data-h="${Math.round(h*10)/10}" data-total="${total}"/>`;
+        segs.push({work,h:Math.round(h*10)/10,y,bh});
       });
+      barInfoStack.push({x,bw,ym:m,total,segs});
       if(months.length<=12||i%2===0||i===months.length-1)
         html+=`<text x="${x+bw/2}" y="${H-2}" font-size="8" fill="#aaa" text-anchor="middle">${m.slice(5)}</text>`;
     });
-    document.getElementById('bal-bar').innerHTML = html;
+    const svgEl=document.getElementById('bal-bar');
+    svgEl.innerHTML=html;
+
+    const tip=document.getElementById('bal-bar-tip');
+    svgEl.addEventListener('mousemove',e=>{
+      const rect=svgEl.getBoundingClientRect();
+      const scaleX=W/rect.width, scaleY=H/rect.height;
+      const mx=(e.clientX-rect.left)*scaleX, my=(e.clientY-rect.top)*scaleY;
+      let found=null;
+      for(const bar of barInfoStack){
+        if(mx>=bar.x&&mx<=bar.x+bar.bw){
+          for(const seg of bar.segs){
+            if(my>=seg.y&&my<=seg.y+seg.bh){found={ym:bar.ym,work:seg.work,h:seg.h,total:bar.total};break;}
+          }
+          if(!found)found={ym:bar.ym,work:'合計',h:bar.total,total:bar.total};
+          break;
+        }
+      }
+      if(found){
+        tip.style.display='block';
+        tip.innerHTML=`<strong>${found.ym}</strong><br>${found.work}: ${found.h}H<br>月計: ${found.total}H`;
+        tip.style.left=(e.clientX-rect.left)+'px';
+        tip.style.top=Math.max(0,(e.clientY-rect.top-60))+'px';
+        svgEl.querySelectorAll('.bal-bar-seg').forEach(el=>{
+          const on=el.dataset.ym===found.ym&&(found.work==='合計'||el.dataset.work===found.work);
+          el.style.opacity=on?'1':'0.3';
+          el.style.filter=on?'brightness(1.1)':'none';
+        });
+      }
+    });
+    svgEl.addEventListener('mouseleave',()=>{
+      tip.style.display='none';
+      svgEl.querySelectorAll('.bal-bar-seg').forEach(el=>{el.style.opacity='0.85';el.style.filter='none';});
+    });
   }
 
   // 事業区分推移
@@ -1837,19 +1876,55 @@ async function renderBalance() {
     data.forEach(d=>{if(mMap[d.ym]&&(d.biz==='直営'||d.biz==='公共'))mMap[d.ym][d.biz]+=d.h;});
     const maxM=Math.max(...months.map(m=>mMap[m]['直営']+mMap[m]['公共']))||1;
     const barW=cW/Math.max(months.length,1);
+    const bizBarInfo=[];
     let html='';
     months.forEach((m,i)=>{
       const x=pL+i*barW+barW*0.05;const bw=barW*0.9;
-      const d=mMap[m]['直営']||0,p=mMap[m]['公共']||0;
-      const dh=Math.max(d?1:0,d/maxM*cH),ph=Math.max(p?1:0,p/maxM*cH);
-      html+=`<rect x="${x}" y="${pT+cH-dh}" width="${bw/2-1}" height="${dh}" fill="${BIZ_COLOR['直営']}" rx="1"/>`;
-      html+=`<rect x="${x+bw/2+1}" y="${pT+cH-ph}" width="${bw/2-1}" height="${ph}" fill="${BIZ_COLOR['公共']}" rx="1"/>`;
+      const dv=Math.round((mMap[m]['直営']||0)*10)/10;
+      const pv=Math.round((mMap[m]['公共']||0)*10)/10;
+      const dh=Math.max(dv?1:0,dv/maxM*cH),ph=Math.max(pv?1:0,pv/maxM*cH);
+      html+=`<rect class="biz-seg" x="${x}" y="${pT+cH-dh}" width="${bw/2-1}" height="${dh}" fill="${BIZ_COLOR['直営']}" rx="1" opacity="0.85"
+        data-ym="${m}" data-biz="直営" data-h="${dv}"/>`;
+      html+=`<rect class="biz-seg" x="${x+bw/2+1}" y="${pT+cH-ph}" width="${bw/2-1}" height="${ph}" fill="${BIZ_COLOR['公共']}" rx="1" opacity="0.85"
+        data-ym="${m}" data-biz="公共" data-h="${pv}"/>`;
       if(months.length<=12||i%2===0||i===months.length-1)
         html+=`<text x="${x+bw/2}" y="${H-1}" font-size="8" fill="#aaa" text-anchor="middle">${m.slice(5)}</text>`;
+      bizBarInfo.push({x,bw,ym:m,直営:dv,公共:pv});
     });
     html+=`<rect x="${pL}" y="2" width="8" height="8" fill="${BIZ_COLOR['直営']}" rx="1"/><text x="${pL+10}" y="10" font-size="9" fill="#888">直営</text>`;
     html+=`<rect x="${pL+42}" y="2" width="8" height="8" fill="${BIZ_COLOR['公共']}" rx="1"/><text x="${pL+52}" y="10" font-size="9" fill="#888">公共</text>`;
-    document.getElementById('bal-biz').innerHTML = html;
+    const svgBiz=document.getElementById('bal-biz');
+    svgBiz.innerHTML=html;
+
+    const tip2=document.getElementById('bal-biz-tip');
+    svgBiz.addEventListener('mousemove',e=>{
+      const rect=svgBiz.getBoundingClientRect();
+      const scaleX=W/rect.width;
+      const mx=(e.clientX-rect.left)*scaleX;
+      let found=null;
+      for(const bar of bizBarInfo){
+        if(mx>=bar.x&&mx<=bar.x+bar.bw){
+          const isLeft=mx<bar.x+bar.bw/2;
+          found={ym:bar.ym,biz:isLeft?'直営':'公共',h:isLeft?bar['直営']:bar['公共']};
+          break;
+        }
+      }
+      if(found){
+        tip2.style.display='block';
+        tip2.innerHTML=`<strong>${found.ym}</strong><br>${found.biz}: ${found.h}H`;
+        tip2.style.left=(e.clientX-rect.left)+'px';
+        tip2.style.top=Math.max(0,(e.clientY-rect.top-55))+'px';
+        svgBiz.querySelectorAll('.biz-seg').forEach(el=>{
+          const on=el.dataset.ym===found.ym&&el.dataset.biz===found.biz;
+          el.style.opacity=on?'1':'0.3';
+          el.style.filter=on?'brightness(1.1)':'none';
+        });
+      }
+    });
+    svgBiz.addEventListener('mouseleave',()=>{
+      tip2.style.display='none';
+      svgBiz.querySelectorAll('.biz-seg').forEach(el=>{el.style.opacity='0.85';el.style.filter='none';});
+    });
   }
 
   // 案件別 or メンバー別
@@ -1999,6 +2074,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 .bal-grp-btn.on{background:#1a1a18;color:#fff;border-color:#1a1a18}
 .bal-member-btn{padding:3px 10px;font-size:11px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
 .bal-member-btn.on{background:#378add;color:#fff;border-color:#378add}
+.bal-tooltip{position:absolute;background:#1a1a18;color:#fff;font-size:11px;padding:5px 9px;border-radius:6px;pointer-events:none;white-space:nowrap;display:none;z-index:10;transform:translateX(-50%)}
+.bal-tooltip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:#1a1a18}
+.bal-chart-wrap{position:relative}
 .btn-sm{padding:3px 9px;font-size:11px}
 </style>
 
@@ -2140,13 +2218,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       </div>
       <div style="background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:10px;padding:.875rem">
         <div style="font-size:11px;font-weight:500;color:#888;margin-bottom:.625rem">月次推移（作業区分）</div>
-        <svg id="bal-bar" viewBox="0 0 300 110" preserveAspectRatio="none" style="width:100%"></svg>
+        <div class="bal-chart-wrap">
+          <svg id="bal-bar" viewBox="0 0 300 110" preserveAspectRatio="none" style="width:100%;cursor:pointer"></svg>
+          <div class="bal-tooltip" id="bal-bar-tip"></div>
+        </div>
       </div>
     </div>
 
     <div style="background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:10px;padding:.875rem;margin-bottom:1.125rem">
       <div style="font-size:11px;font-weight:500;color:#888;margin-bottom:.625rem">事業区分推移（直営 vs 公共）</div>
-      <svg id="bal-biz" viewBox="0 0 640 90" preserveAspectRatio="none" style="width:100%"></svg>
+      <div class="bal-chart-wrap">
+        <svg id="bal-biz" viewBox="0 0 640 90" preserveAspectRatio="none" style="width:100%;cursor:pointer"></svg>
+        <div class="bal-tooltip" id="bal-biz-tip"></div>
+      </div>
     </div>
 
     <!-- 案件別 or メンバー別 -->
