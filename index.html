@@ -390,6 +390,7 @@ function buildTabs() {
     { id:'calendar',  icon:'ti-calendar',          label:'カレンダー',     show:true },
     { id:'list',      icon:'ti-table',             label:'集計',           show:true },
     { id:'workload',  icon:'ti-chart-bar',          label:'工数',           show:true },
+    { id:'balance',   icon:'ti-chart-pie',          label:'バランス分析',   show:true },
     { id:'insight',   icon:'ti-bulb',               label:'インサイト',     show:true },
     { id:'paid',      icon:'ti-leaf',              label:'有給',           show:true },
     { id:'admin',     icon:'ti-users',             label:'チーム',         show:isAdmin()||isSub() },
@@ -431,6 +432,7 @@ function showTab(id) {
     accounts:  renderAccounts,
     master:    renderMaster,
     insight:   renderInsight,
+    balance:   renderBalance,
   };
   if (renderers[id]) renderers[id]();
 }
@@ -1607,6 +1609,243 @@ function drawDailyChart(ym, records) {
 
 
 // ============================================================
+// バランス分析
+// ============================================================
+let balGrp = 'all';
+let balAllData = [];  // { date, ym, proj, biz, work, task, h, userId }
+
+async function loadBalanceData() {
+  // 権限範囲内の全メンバーのtask_entriesを取得
+  const vm = vMembers();
+  const results = await Promise.all(vm.map(async a => {
+    const { data } = await sb.from('task_entries')
+      .select('date, project, task, hours, biz_type, work_type')
+      .eq('user_id', a.id)
+      .order('date');
+    return (data||[]).map(r => ({
+      date: r.date,
+      ym: r.date.slice(0,7),
+      proj: r.project,
+      biz: r.biz_type || 'その他',
+      work: r.work_type || 'その他',
+      task: r.task,
+      h: parseFloat(r.hours),
+      userId: a.id,
+      userName: a.name
+    }));
+  }));
+  balAllData = results.flat();
+}
+
+function balInitControls() {
+  // メンバーボタン初期化
+  const vm = vMembers();
+  const memberRow = document.getElementById('bal-member-row');
+  const memberBtns = document.getElementById('bal-member-btns');
+  if (vm.length <= 1) {
+    memberRow.style.display = 'none';
+  } else {
+    memberBtns.innerHTML = vm.map(a =>
+      `<button class="bal-member-btn on" data-uid="${a.id}" onclick="balToggleMember(this)">${a.name}</button>`
+    ).join('');
+  }
+
+  // 日付初期化
+  const today = new Date();
+  const sixMonthsAgo = new Date(today.getFullYear(), today.getMonth()-5, 1);
+  document.getElementById('bal-from').value = sixMonthsAgo.toISOString().slice(0,10);
+  document.getElementById('bal-to').value = today.toISOString().slice(0,10);
+}
+
+function balSetGrp(grp, btn) {
+  balGrp = grp;
+  document.querySelectorAll('.bal-grp-btn').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  balUpdateProjSel();
+  renderBalance();
+}
+
+function balToggleMember(btn) {
+  btn.classList.toggle('on');
+  renderBalance();
+}
+
+function balUpdateProjSel() {
+  const sel = document.getElementById('bal-proj-sel');
+  const projs = [...new Set(balAllData
+    .filter(d => balGrp === 'all' || d.biz === balGrp)
+    .map(d => d.proj)
+  )].sort((a,b) => a.localeCompare(b,'ja'));
+  sel.innerHTML = '<option value="all">全案件</option>' +
+    projs.map(p => `<option value="${p}">${p}</option>`).join('');
+}
+
+function balFilterData() {
+  const from = document.getElementById('bal-from').value;
+  const to   = document.getElementById('bal-to').value;
+  const proj = document.getElementById('bal-proj-sel').value;
+  const selectedMembers = [...document.querySelectorAll('.bal-member-btn.on')].map(b => b.dataset.uid);
+
+  return balAllData.filter(d => {
+    if (d.date < from || d.date > to) return false;
+    if (balGrp !== 'all' && d.biz !== balGrp) return false;
+    if (proj !== 'all' && d.proj !== proj) return false;
+    if (selectedMembers.length && !selectedMembers.includes(d.userId)) return false;
+    return true;
+  });
+}
+
+async function renderBalance() {
+  if (!balAllData.length) {
+    showLoading('工数データを取得中...');
+    await loadBalanceData();
+    balInitControls();
+    balUpdateProjSel();
+    hideLoading();
+  }
+
+  const data = balFilterData();
+  const proj = document.getElementById('bal-proj-sel').value;
+  const isSingle = proj !== 'all';
+
+  const WORK_COLOR = {'導入':'#e24b4a','保守':'#378add','営業':'#f0a500','その他':'#888780'};
+  const BIZ_COLOR  = {'直営':'#7f77dd','公共':'#5dcaa5','その他':'#d3d1c7'};
+  const BIZ_BG     = {'直営':'#eeedfe','公共':'#eaf3de','その他':'#f1efe8'};
+  const BIZ_TEXT   = {'直営':'#3c3489','公共':'#3b6d11','その他':'#888780'};
+
+  if (!data.length) {
+    document.getElementById('bal-stats').innerHTML = '<div style="color:#aaa;font-size:12px;grid-column:1/-1;padding:.5rem">データなし</div>';
+    ['bal-donut','bal-bar','bal-biz'].forEach(id => { const el=document.getElementById(id); if(el) el.innerHTML=''; });
+    document.getElementById('bal-rank-content').innerHTML = '<div style="color:#aaa;font-size:12px;padding:1rem">データなし</div>';
+    return;
+  }
+
+  const totalH = Math.round(data.reduce((s,d)=>s+d.h,0)*10)/10;
+  const workMap = {}; const bizMap = {}; const projMap = {}; const memberMap = {};
+  const months = [...new Set(data.map(d=>d.ym))].sort();
+  const WORKS = ['導入','保守','営業','その他'];
+
+  data.forEach(d => {
+    workMap[d.work] = (workMap[d.work]||0) + d.h;
+    bizMap[d.biz]   = (bizMap[d.biz]||0) + d.h;
+    if (!projMap[d.proj]) projMap[d.proj] = {h:0, biz:d.biz};
+    projMap[d.proj].h += d.h;
+    if (!memberMap[d.userId]) memberMap[d.userId] = {h:0, name:d.userName};
+    memberMap[d.userId].h += d.h;
+  });
+
+  // サマリー
+  document.getElementById('bal-stats').innerHTML = `
+    <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${totalH}<span class="dcard-unit">H</span></div></div>
+    <div class="dcard"><div class="dcard-label">${isSingle?'期間':'案件数'}</div><div class="dcard-val">${isSingle?months.length+'<span class="dcard-unit">ヶ月</span>':Object.keys(projMap).length+'<span class="dcard-unit">件</span>'}</div></div>
+    <div class="dcard"><div class="dcard-label">直営</div><div class="dcard-val">${Math.round(bizMap['直営']||0)}<span class="dcard-unit">H</span></div></div>
+    <div class="dcard"><div class="dcard-label">公共</div><div class="dcard-val">${Math.round(bizMap['公共']||0)}<span class="dcard-unit">H</span></div></div>`;
+
+  // ドーナツ
+  const cx=60,cy=60,r=44,ri=27;
+  let angle=-Math.PI/2, paths='';
+  const workEntries = Object.entries(workMap).filter(([,h])=>h>0).sort((a,b)=>b[1]-a[1]);
+  workEntries.forEach(([work,h]) => {
+    const sweep=h/totalH*Math.PI*2;
+    const x1=cx+r*Math.cos(angle),y1=cy+r*Math.sin(angle);
+    const x2=cx+r*Math.cos(angle+sweep),y2=cy+r*Math.sin(angle+sweep);
+    const xi1=cx+ri*Math.cos(angle),yi1=cy+ri*Math.sin(angle);
+    const xi2=cx+ri*Math.cos(angle+sweep),yi2=cy+ri*Math.sin(angle+sweep);
+    const lg=sweep>Math.PI?1:0;
+    paths+=`<path d="M ${x1} ${y1} A ${r} ${r} 0 ${lg} 1 ${x2} ${y2} L ${xi2} ${yi2} A ${ri} ${ri} 0 ${lg} 0 ${xi1} ${yi1} Z" fill="${WORK_COLOR[work]||'#888'}" opacity="0.85"/>`;
+    angle+=sweep;
+  });
+  paths+=`<text x="${cx}" y="${cy-4}" font-size="11" fill="#1a1a18" text-anchor="middle" font-weight="500">${totalH}H</text>`;
+  paths+=`<text x="${cx}" y="${cy+9}" font-size="9" fill="#888" text-anchor="middle">合計</text>`;
+  document.getElementById('bal-donut').innerHTML = paths;
+  document.getElementById('bal-donut-legend').innerHTML = workEntries.map(([w,h]) =>
+    `<div style="display:flex;align-items:center;gap:6px;font-size:11px;color:#888;margin-bottom:4px">
+      <div style="width:9px;height:9px;border-radius:50%;background:${WORK_COLOR[w]||'#888'};flex-shrink:0"></div>
+      <span>${w}</span>
+      <span style="margin-left:6px;font-weight:500;color:#1a1a18">${Math.round(h)}H (${Math.round(h/totalH*100)}%)</span>
+    </div>`
+  ).join('');
+
+  // 積み上げ棒グラフ（作業区分）
+  {
+    const W=300,H=110,pL=20,pR=6,pT=6,pB=22;
+    const cW=W-pL-pR,cH=H-pT-pB;
+    const mMap={};
+    months.forEach(m=>{mMap[m]={};WORKS.forEach(w=>{mMap[m][w]=0;});});
+    data.forEach(d=>{if(mMap[d.ym])mMap[d.ym][d.work]+=d.h;});
+    const maxM=Math.max(...months.map(m=>Object.values(mMap[m]).reduce((s,v)=>s+v,0)))||1;
+    const barW=cW/Math.max(months.length,1);
+    let html='';
+    months.forEach((m,i)=>{
+      const x=pL+i*barW+barW*0.1;const bw=barW*0.8;let y=pT+cH;
+      [...WORKS].reverse().forEach(work=>{
+        const h=mMap[m][work]||0;if(!h)return;
+        const bh=Math.max(1,h/maxM*cH);y-=bh;
+        html+=`<rect x="${x}" y="${y}" width="${bw}" height="${bh}" fill="${WORK_COLOR[work]||'#888'}" opacity="0.85" rx="1"/>`;
+      });
+      if(months.length<=12||i%2===0||i===months.length-1)
+        html+=`<text x="${x+bw/2}" y="${H-2}" font-size="8" fill="#aaa" text-anchor="middle">${m.slice(5)}</text>`;
+    });
+    document.getElementById('bal-bar').innerHTML = html;
+  }
+
+  // 事業区分推移
+  {
+    const W=640,H=90,pL=28,pR=8,pT=14,pB=18;
+    const cW=W-pL-pR,cH=H-pT-pB;
+    const mMap={};
+    months.forEach(m=>{mMap[m]={直営:0,公共:0};});
+    data.forEach(d=>{if(mMap[d.ym]&&(d.biz==='直営'||d.biz==='公共'))mMap[d.ym][d.biz]+=d.h;});
+    const maxM=Math.max(...months.map(m=>mMap[m]['直営']+mMap[m]['公共']))||1;
+    const barW=cW/Math.max(months.length,1);
+    let html='';
+    months.forEach((m,i)=>{
+      const x=pL+i*barW+barW*0.05;const bw=barW*0.9;
+      const d=mMap[m]['直営']||0,p=mMap[m]['公共']||0;
+      const dh=Math.max(d?1:0,d/maxM*cH),ph=Math.max(p?1:0,p/maxM*cH);
+      html+=`<rect x="${x}" y="${pT+cH-dh}" width="${bw/2-1}" height="${dh}" fill="${BIZ_COLOR['直営']}" rx="1"/>`;
+      html+=`<rect x="${x+bw/2+1}" y="${pT+cH-ph}" width="${bw/2-1}" height="${ph}" fill="${BIZ_COLOR['公共']}" rx="1"/>`;
+      if(months.length<=12||i%2===0||i===months.length-1)
+        html+=`<text x="${x+bw/2}" y="${H-1}" font-size="8" fill="#aaa" text-anchor="middle">${m.slice(5)}</text>`;
+    });
+    html+=`<rect x="${pL}" y="2" width="8" height="8" fill="${BIZ_COLOR['直営']}" rx="1"/><text x="${pL+10}" y="10" font-size="9" fill="#888">直営</text>`;
+    html+=`<rect x="${pL+42}" y="2" width="8" height="8" fill="${BIZ_COLOR['公共']}" rx="1"/><text x="${pL+52}" y="10" font-size="9" fill="#888">公共</text>`;
+    document.getElementById('bal-biz').innerHTML = html;
+  }
+
+  // 案件別 or メンバー別
+  if (isSingle) {
+    document.getElementById('bal-rank-title').textContent = `メンバー別工数（${proj}）`;
+    const entries = Object.entries(memberMap).sort((a,b)=>b[1].h-a[1].h);
+    document.getElementById('bal-rank-content').innerHTML = `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px">${
+      entries.map(([uid,{h,name}]) => `
+        <div class="dcard">
+          <div class="dcard-label"><i class="ti ti-user" style="font-size:11px;margin-right:3px" aria-hidden="true"></i>${name}</div>
+          <div class="dcard-val">${Math.round(h)}<span class="dcard-unit">H</span></div>
+          <div style="font-size:11px;color:#aaa;margin-top:2px">${Math.round(h/totalH*100)}%</div>
+        </div>`).join('')
+    }</div>`;
+  } else {
+    document.getElementById('bal-rank-title').textContent = '案件別ランキング';
+    const sorted = Object.entries(projMap).sort((a,b)=>b[1].h-a[1].h).slice(0,15);
+    if (!sorted.length) { document.getElementById('bal-rank-content').innerHTML='<div style="color:#aaa;font-size:12px;padding:1rem">データなし</div>'; return; }
+    const maxH = sorted[0][1].h;
+    document.getElementById('bal-rank-content').innerHTML = `<div style="border:0.5px solid rgba(0,0,0,.1);border-radius:8px;overflow:hidden">${
+      sorted.map(([proj,{h,biz}],i) => `
+        <div style="display:flex;align-items:center;gap:8px;padding:.5rem .875rem;font-size:12px;${i>0?'border-top:0.5px solid rgba(0,0,0,.06)':''}">
+          <span style="min-width:18px;color:#aaa;font-size:11px">${i+1}</span>
+          <span style="min-width:80px;font-weight:500">${proj}</span>
+          <span style="font-size:9px;padding:1px 5px;border-radius:10px;background:${BIZ_BG[biz]||'#f1efe8'};color:${BIZ_TEXT[biz]||'#888'};flex-shrink:0">${biz}</span>
+          <div style="flex:1;background:#f0f0ee;border-radius:3px;height:6px;overflow:hidden">
+            <div style="width:${Math.round(h/maxH*100)}%;height:100%;border-radius:3px;background:${BIZ_COLOR[biz]||'#888'}"></div>
+          </div>
+          <span style="min-width:40px;text-align:right;font-weight:500">${Math.round(h)}H</span>
+        </div>`).join('')
+    }</div>`;
+  }
+}
+
+// ============================================================
 // 起動（セッション復元）
 // ============================================================
 window.addEventListener('load', async () => {
@@ -1717,6 +1956,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 .btn-p:hover{opacity:.85}
 .btn-d{color:#A32D2D;border-color:#A32D2D}.btn-d:hover{background:#FCEBEB}
 .btn-full{width:100%;padding:8px;font-size:13px;margin-top:3px}
+.bal-grp-btn{padding:4px 12px;font-size:12px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
+.bal-grp-btn.on{background:#1a1a18;color:#fff;border-color:#1a1a18}
+.bal-member-btn{padding:3px 10px;font-size:11px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
+.bal-member-btn.on{background:#378add;color:#fff;border-color:#378add}
 .btn-sm{padding:3px 9px;font-size:11px}
 </style>
 
@@ -1800,6 +2043,64 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
     </div>
     <div class="wlw"><table class="wlt" id="wl-table"></table></div>
+  </div>
+
+  <!-- Balance -->
+  <div id="sec-balance" class="section">
+    <!-- コントロールバー -->
+    <div style="background:#f5f5f3;border-radius:10px;padding:.875rem 1rem;margin-bottom:1.125rem">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <span style="font-size:11px;color:#888;white-space:nowrap">事業区分</span>
+        <div style="display:flex;gap:4px;flex-wrap:wrap" id="bal-grp-btns">
+          <button class="bal-grp-btn on" data-grp="all" onclick="balSetGrp('all',this)">全案件</button>
+          <button class="bal-grp-btn" data-grp="直営" onclick="balSetGrp('直営',this)">直営</button>
+          <button class="bal-grp-btn" data-grp="公共" onclick="balSetGrp('公共',this)">公共</button>
+          <button class="bal-grp-btn" data-grp="その他" onclick="balSetGrp('その他',this)">その他</button>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" id="bal-member-row">
+        <span style="font-size:11px;color:#888;white-space:nowrap">メンバー</span>
+        <div style="display:flex;gap:4px;flex-wrap:wrap" id="bal-member-btns"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:11px;color:#888;white-space:nowrap">案件</span>
+        <select id="bal-proj-sel" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff;min-width:140px" onchange="renderBalance()">
+          <option value="all">全案件</option>
+        </select>
+        <span style="font-size:11px;color:#888;white-space:nowrap;margin-left:8px">期間</span>
+        <input type="date" id="bal-from" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+        <span style="font-size:11px;color:#888">〜</span>
+        <input type="date" id="bal-to" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+        <button class="btn btn-p" onclick="renderBalance()" style="font-size:12px">表示</button>
+      </div>
+    </div>
+
+    <!-- サマリーカード -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:1.125rem" id="bal-stats"></div>
+
+    <!-- チャート -->
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:1.125rem">
+      <div style="background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:10px;padding:.875rem">
+        <div style="font-size:11px;font-weight:500;color:#888;margin-bottom:.625rem">作業区分比率</div>
+        <div style="display:flex;align-items:center;gap:12px">
+          <svg id="bal-donut" viewBox="0 0 120 120" style="width:110px;flex-shrink:0"></svg>
+          <div id="bal-donut-legend"></div>
+        </div>
+      </div>
+      <div style="background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:10px;padding:.875rem">
+        <div style="font-size:11px;font-weight:500;color:#888;margin-bottom:.625rem">月次推移（作業区分）</div>
+        <svg id="bal-bar" viewBox="0 0 300 110" preserveAspectRatio="none" style="width:100%"></svg>
+      </div>
+    </div>
+
+    <div style="background:#fff;border:0.5px solid rgba(0,0,0,.12);border-radius:10px;padding:.875rem;margin-bottom:1.125rem">
+      <div style="font-size:11px;font-weight:500;color:#888;margin-bottom:.625rem">事業区分推移（直営 vs 公共）</div>
+      <svg id="bal-biz" viewBox="0 0 640 90" preserveAspectRatio="none" style="width:100%"></svg>
+    </div>
+
+    <!-- 案件別 or メンバー別 -->
+    <div style="font-size:12px;font-weight:500;color:#888;margin-bottom:.5rem" id="bal-rank-title">案件別ランキング</div>
+    <div id="bal-rank-content"></div>
   </div>
 
   <!-- Insight -->
