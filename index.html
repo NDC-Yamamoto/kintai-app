@@ -208,7 +208,7 @@ async function apiAddPaidUsage(grantId, userId, date, days) {
 /** マスタ **/
 async function apiFetchMaster() {
   const [{ data: projs }, { data: tasks }, { data: bizTypes }, { data: workTypes }] = await Promise.all([
-    sb.from('projects').select('id, name, status, last_biz_type, last_work_type').order('name'),
+    sb.from('projects').select('id, name, status, default_biz_type, last_biz_type, last_work_type').order('name'),
     sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id'),
     sb.from('biz_types').select('*').order('sort_order'),
     sb.from('work_types').select('*').order('sort_order')
@@ -248,6 +248,11 @@ async function apiAddProject(name) {
 
 async function apiUpdateProjectStatus(name, status) {
   const { error } = await sb.from('projects').update({ status }).eq('name', name);
+  if (error) throw error;
+}
+
+async function apiUpdateProjectDefaultBiz(name, defaultBiz) {
+  const { error } = await sb.from('projects').update({ default_biz_type: defaultBiz }).eq('name', name);
   if (error) throw error;
 }
 
@@ -1092,32 +1097,99 @@ async function delAcct() {
 const STATUS_COLOR = {'営業中':'#faeeda','導入中':'#e6f1fb','保守中':'#eaf3de','失注':'#f1efe8','その他':'#eeedfe'};
 const STATUS_TEXT  = {'営業中':'#854f0b','導入中':'#0c447c','保守中':'#3b6d11','失注':'#888','その他':'#3c3489'};
 const STATUS_LIST  = ['営業中','導入中','保守中','失注','その他'];
+const BIZ_LIST_M   = ['直営','公共','その他'];
+const BIZ_COLOR_M  = {'直営':'#eeedfe','公共':'#eaf3de','その他':'#f1efe8'};
+const BIZ_TEXT_M   = {'直営':'#3c3489','公共':'#3b6d11','その他':'#888'};
 
 function renderMaster() {
   const raw = master.projectsRaw || [];
 
-  // ステータス別にグループ化
-  const grouped = {};
-  STATUS_LIST.forEach(s => { grouped[s] = []; });
-  raw.forEach(p => { const s = p.status || '保守中'; if(grouped[s]) grouped[s].push(p); });
+  // ステータス × 事業区分 マトリクス
+  const matrix = {};
+  STATUS_LIST.forEach(s => {
+    matrix[s] = {};
+    BIZ_LIST_M.forEach(b => { matrix[s][b] = []; });
+  });
+  raw.forEach(p => {
+    const s = p.status || '保守中';
+    const b = p.default_biz_type || 'その他';
+    if (matrix[s] && matrix[s][b]) matrix[s][b].push(p);
+  });
 
-  let html = '';
-  STATUS_LIST.forEach(status => {
-    if(!grouped[status].length) return;
-    html += `<div style="margin-bottom:.75rem">
-      <div style="font-size:11px;font-weight:500;padding:2px 8px;border-radius:10px;display:inline-block;margin-bottom:5px;background:${STATUS_COLOR[status]};color:${STATUS_TEXT[status]}">${status}（${grouped[status].length}件）</div>
-      <div style="display:flex;flex-wrap:wrap;gap:4px">
-        ${grouped[status].map(p => `
-          <div style="display:flex;align-items:center;gap:4px;padding:3px 8px;border:0.5px solid rgba(0,0,0,.15);border-radius:8px;background:#f5f5f3;font-size:12px">
-            <span>${p.name}</span>
-            <select onchange="updateProjStatus('${p.name}',this.value)" style="font-size:10px;border:none;background:transparent;color:#888;cursor:pointer;padding:0">
-              ${STATUS_LIST.map(s => `<option value="${s}" ${s===status?'selected':''}>${s}</option>`).join('')}
+  // 失注以外で案件がある行だけ表示
+  const activeStatuses = STATUS_LIST.filter(s =>
+    s !== '失注' && BIZ_LIST_M.some(b => matrix[s][b].length > 0)
+  );
+
+  let html = '<div style="overflow-x:auto">';
+  html += '<table style="border-collapse:collapse;width:100%;font-size:12px">';
+  // ヘッダー
+  html += '<thead><tr>';
+  html += '<th style="padding:6px 10px;text-align:left;font-weight:400;color:#888;border-bottom:0.5px solid rgba(0,0,0,.1);white-space:nowrap">ステータス</th>';
+  BIZ_LIST_M.forEach(b => {
+    html += `<th style="padding:6px 10px;text-align:left;font-weight:500;border-bottom:0.5px solid rgba(0,0,0,.1);white-space:nowrap">
+      <span style="padding:2px 8px;border-radius:10px;background:${BIZ_COLOR_M[b]};color:${BIZ_TEXT_M[b]}">${b}</span>
+    </th>`;
+  });
+  html += '</tr></thead><tbody>';
+
+  activeStatuses.forEach(status => {
+    const maxRows = Math.max(...BIZ_LIST_M.map(b => matrix[status][b].length), 1);
+    html += `<tr style="border-top:0.5px solid rgba(0,0,0,.08)">`;
+    html += `<td style="padding:8px 10px;vertical-align:top;white-space:nowrap">
+      <span style="padding:2px 8px;border-radius:10px;font-size:11px;background:${STATUS_COLOR[status]};color:${STATUS_TEXT[status]}">${status}</span>
+    </td>`;
+    BIZ_LIST_M.forEach(b => {
+      const projs = matrix[status][b];
+      html += `<td style="padding:6px 8px;vertical-align:top">`;
+      if (projs.length) {
+        html += `<div style="display:flex;flex-direction:column;gap:4px">`;
+        projs.forEach(p => {
+          html += `<div style="display:flex;align-items:center;gap:4px;padding:3px 8px;border:0.5px solid rgba(0,0,0,.12);border-radius:8px;background:#f5f5f3;font-size:12px;white-space:nowrap">
+            <span style="font-weight:500">${p.name}</span>
+            <select onchange="updateProjBiz('${p.name.replace(/'/g,"\'")}',this.value)"
+              style="font-size:10px;border:none;background:transparent;color:#888;cursor:pointer;padding:0;margin-left:2px">
+              ${BIZ_LIST_M.map(bv => `<option value="${bv}" ${bv===b?'selected':''}>${bv}</option>`).join('')}
             </select>
-            <span style="cursor:pointer;color:#aaa;font-size:12px" onclick="delProj('${p.name}')">×</span>
+            <select onchange="updateProjStatus('${p.name.replace(/'/g,"\'")}',this.value)"
+              style="font-size:10px;border:none;background:transparent;color:#aaa;cursor:pointer;padding:0">
+              ${STATUS_LIST.map(sv => `<option value="${sv}" ${sv===status?'selected':''}>${sv}</option>`).join('')}
+            </select>
+            <span style="cursor:pointer;color:#ccc;font-size:12px" onclick="delProj('${p.name.replace(/'/g,"\'")}')">×</span>
+          </div>`;
+        });
+        html += `</div>`;
+      } else {
+        html += `<span style="color:#e1e0d9;font-size:11px">—</span>`;
+      }
+      html += `</td>`;
+    });
+    html += `</tr>`;
+  });
+
+  // 失注行
+  const lostProjs = raw.filter(p => p.status === '失注');
+  if (lostProjs.length) {
+    html += `<tr style="border-top:0.5px solid rgba(0,0,0,.08)">`;
+    html += `<td style="padding:8px 10px;vertical-align:top;white-space:nowrap">
+      <span style="padding:2px 8px;border-radius:10px;font-size:11px;background:${STATUS_COLOR['失注']};color:${STATUS_TEXT['失注']}">失注</span>
+    </td>`;
+    html += `<td colspan="3" style="padding:6px 8px">
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${lostProjs.map(p => `
+          <div style="display:flex;align-items:center;gap:4px;padding:2px 8px;border:0.5px solid rgba(0,0,0,.08);border-radius:8px;background:#fafaf8;font-size:11px;color:#aaa">
+            <span>${p.name}</span>
+            <select onchange="updateProjStatus('${p.name.replace(/'/g,"\'")}',this.value)"
+              style="font-size:10px;border:none;background:transparent;color:#aaa;cursor:pointer;padding:0">
+              ${STATUS_LIST.map(sv => `<option value="${sv}" ${sv==='失注'?'selected':''}>${sv}</option>`).join('')}
+            </select>
+            <span style="cursor:pointer;color:#ccc" onclick="delProj('${p.name.replace(/'/g,"\'")}')">×</span>
           </div>`).join('')}
       </div>
-    </div>`;
-  });
+    </td></tr>`;
+  }
+
+  html += '</tbody></table></div>';
   document.getElementById('proj-list').innerHTML = html;
   document.getElementById('task-mlist').innerHTML = master.tasks.map((t,i) =>
     `<div class="mtag"><span style="color:var(--color-text-secondary);font-size:9px;margin-right:2px">${t.proj||''}</span>${t.name}<span class="x" onclick="delTaskM('${t.name}','${t.proj}')">×</span></div>`
@@ -1200,6 +1272,14 @@ async function addProj() {
 async function updateProjStatus(name, status) {
   try {
     await apiUpdateProjectStatus(name, status);
+    const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
+    renderMaster();
+  } catch(e) { showError(e.message); }
+}
+
+async function updateProjBiz(name, defaultBiz) {
+  try {
+    await apiUpdateProjectDefaultBiz(name, defaultBiz);
     const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
     renderMaster();
   } catch(e) { showError(e.message); }
@@ -1360,11 +1440,13 @@ function selectProj(name) {
   hideProjSuggest();
   updTS(name);
 
-  // projectsRawからlast_biz_type/last_work_typeを自動セット
+  // projectsRawからdefault_biz_type/last_work_typeを自動セット
   const raw = master.projectsRaw || [];
   const proj = raw.find(p => p.name === name);
   if (proj) {
-    if (proj.last_biz_type) document.getElementById('ta-biz').value = proj.last_biz_type;
+    // default_biz_typeを優先、なければlast_biz_type
+    const biz = proj.default_biz_type || proj.last_biz_type;
+    if (biz) document.getElementById('ta-biz').value = biz;
     if (proj.last_work_type) document.getElementById('ta-work').value = proj.last_work_type;
   }
 }
