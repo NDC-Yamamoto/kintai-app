@@ -628,6 +628,182 @@ function renderList() {
 }
 
 // ============================================================
+// 工数サブタブ
+// ============================================================
+let wllAllEntries = []; // 一覧用全エントリーキャッシュ
+let wllProjFilter = '';
+
+function wlSubTab(id, btn) {
+  document.querySelectorAll('.wl-sub-tab').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+  document.getElementById('wl-pane-summary').style.display = id === 'summary' ? '' : 'none';
+  document.getElementById('wl-pane-list').style.display = id === 'list' ? '' : 'none';
+  if (id === 'list') initWllList();
+}
+
+async function initWllList() {
+  // 初期化：フィルターセレクトを設定
+  const bizSel = document.getElementById('wll-biz');
+  const workSel = document.getElementById('wll-work');
+  bizSel.innerHTML = '<option value="all">事業区分：全て</option>' +
+    bizTypesCache.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
+  workSel.innerHTML = '<option value="all">作業区分：全て</option>' +
+    workTypesCache.map(w => `<option value="${w.name}">${w.name}</option>`).join('');
+
+  // デフォルト期間：直近3ヶ月
+  const today = new Date();
+  const from = new Date(today.getFullYear(), today.getMonth()-2, 1);
+  document.getElementById('wll-from').value = from.toISOString().slice(0,10);
+  document.getElementById('wll-to').value = today.toISOString().slice(0,10);
+
+  await loadWllEntries();
+  renderWllList();
+}
+
+async function loadWllEntries() {
+  const uid = document.getElementById('wl-vsel')?.value || me.id;
+  const from = document.getElementById('wll-from').value;
+  const to   = document.getElementById('wll-to').value;
+  if (!from || !to) return;
+
+  showLoading('工数データを取得中...');
+  let all = [], offset = 0;
+  while (true) {
+    const { data, error } = await sb.from('task_entries')
+      .select('id, date, project, task, biz_type, work_type, hours')
+      .eq('user_id', uid)
+      .gte('date', from).lte('date', to)
+      .order('date', { ascending: false })
+      .range(offset, offset + 999);
+    if (error || !data || !data.length) break;
+    all = all.concat(data);
+    if (data.length < 1000) break;
+    offset += 1000;
+  }
+  wllAllEntries = all;
+  hideLoading();
+}
+
+function filterWllProj() {
+  const q = document.getElementById('wll-proj').value.trim().toLowerCase();
+  const el = document.getElementById('wll-proj-suggest');
+  if (!q) { el.style.display = 'none'; return; }
+  const projs = [...new Set(wllAllEntries.map(e => e.project))]
+    .filter(p => p.toLowerCase().includes(q))
+    .sort((a,b) => a.localeCompare(b,'ja'));
+  if (!projs.length) { el.style.display = 'none'; return; }
+  el.innerHTML = projs.map(p =>
+    `<div onclick="selectWllProj('${p.replace(/'/g,"\'")}')"
+      style="padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,.06)"
+      onmouseover="this.style.background='#f5f5f3'" onmouseout="this.style.background=''">${p}</div>`
+  ).join('');
+  el.style.display = 'block';
+}
+
+function selectWllProj(name) {
+  document.getElementById('wll-proj').value = name;
+  wllProjFilter = name;
+  document.getElementById('wll-proj-suggest').style.display = 'none';
+}
+
+function hideWllProj() {
+  document.getElementById('wll-proj-suggest').style.display = 'none';
+}
+
+function resetWllFilter() {
+  document.getElementById('wll-biz').value = 'all';
+  document.getElementById('wll-work').value = 'all';
+  document.getElementById('wll-proj').value = '';
+  wllProjFilter = '';
+  renderWllList();
+}
+
+function renderWllList() {
+  const biz  = document.getElementById('wll-biz').value;
+  const work = document.getElementById('wll-work').value;
+  const proj = document.getElementById('wll-proj').value.trim();
+
+  const filtered = wllAllEntries.filter(e => {
+    if (biz !== 'all' && (e.biz_type||'その他') !== biz) return false;
+    if (work !== 'all' && (e.work_type||'その他') !== work) return false;
+    if (proj && e.project !== proj) return false;
+    return true;
+  });
+
+  document.getElementById('wll-count').textContent = `${filtered.length}件`;
+
+  const BIZ_BG   = {'直営':'#eeedfe','公共':'#eaf3de','その他':'#f1efe8'};
+  const BIZ_TEXT = {'直営':'#3c3489','公共':'#3b6d11','その他':'#888'};
+  const WORK_BG  = {'導入':'#faeeda','保守':'#e6f1fb','営業':'#fcebeb','その他':'#f1efe8'};
+  const WORK_TEXT= {'導入':'#854f0b','保守':'#0c447c','営業':'#a32d2d','その他':'#888'};
+
+  const tbody = document.getElementById('wll-tbody');
+  tbody.innerHTML = filtered.map(e => {
+    const bz = e.biz_type || 'その他';
+    const wk = e.work_type || 'その他';
+    const wd = new Date(e.date).getDay();
+    const DAY = ['日','月','火','水','木','金','土'];
+    return `<tr style="border-bottom:0.5px solid rgba(0,0,0,.06);cursor:pointer" onclick="openWllEdit(${e.id},'${e.date}','${e.project}','${e.task}','${bz}','${wk}',${e.hours})">
+      <td style="padding:5px 8px;white-space:nowrap;color:${wd===0?'#e24b4a':wd===6?'#378add':'inherit'}">${e.date}(${DAY[wd]})</td>
+      <td style="padding:5px 8px;font-weight:500">${e.project}</td>
+      <td style="padding:5px 8px;color:#888">${e.task}</td>
+      <td style="padding:5px 8px"><span style="font-size:10px;padding:1px 6px;border-radius:10px;background:${BIZ_BG[bz]};color:${BIZ_TEXT[bz]}">${bz}</span></td>
+      <td style="padding:5px 8px"><span style="font-size:10px;padding:1px 6px;border-radius:10px;background:${WORK_BG[wk]};color:${WORK_TEXT[wk]}">${wk}</span></td>
+      <td style="padding:5px 8px;text-align:right;font-weight:500">${e.hours}H</td>
+      <td style="padding:5px 8px"><button class="btn btn-sm" style="font-size:10px" onclick="event.stopPropagation();openWllEdit(${e.id},'${e.date}','${e.project}','${e.task}','${bz}','${wk}',${e.hours})"><i class="ti ti-edit"></i></button></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" style="text-align:center;color:#aaa;padding:2rem">データなし</td></tr>';
+}
+
+function openWllEdit(id, date, proj, task, biz, work, hours) {
+  document.getElementById('wle-id').value = id;
+  document.getElementById('wle-date').value = date;
+  document.getElementById('wle-proj').value = proj;
+  document.getElementById('wle-task').value = task;
+  document.getElementById('wle-biz').innerHTML =
+    '<option value="">事業区分</option>' + bizTypesCache.map(b => `<option value="${b.name}" ${b.name===biz?'selected':''}>${b.name}</option>`).join('');
+  document.getElementById('wle-work').innerHTML =
+    '<option value="">作業区分</option>' + workTypesCache.map(w => `<option value="${w.name}" ${w.name===work?'selected':''}>${w.name}</option>`).join('');
+  document.getElementById('wle-hours').value = hours;
+  document.getElementById('m-wle').style.display = 'flex';
+}
+
+async function saveWllEdit() {
+  const id    = parseInt(document.getElementById('wle-id').value);
+  const proj  = document.getElementById('wle-proj').value.trim();
+  const task  = document.getElementById('wle-task').value.trim();
+  const biz   = document.getElementById('wle-biz').value;
+  const work  = document.getElementById('wle-work').value;
+  const hours = parseFloat(document.getElementById('wle-hours').value);
+  if (!proj || !task || isNaN(hours)) return;
+
+  showLoading('保存中...');
+  try {
+    const { error } = await sb.from('task_entries')
+      .update({ project: proj, task, biz_type: biz, work_type: work, hours })
+      .eq('id', id);
+    if (error) throw error;
+    // キャッシュ更新
+    const idx = wllAllEntries.findIndex(e => e.id === id);
+    if (idx >= 0) wllAllEntries[idx] = {...wllAllEntries[idx], project:proj, task, biz_type:biz, work_type:work, hours};
+    hideLoading();
+    hm('m-wle');
+    renderWllList();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+async function deleteWllEntry() {
+  const id = parseInt(document.getElementById('wle-id').value);
+  if (!confirm('このエントリーを削除しますか？')) return;
+  showLoading('削除中...');
+  try {
+    await sb.from('task_entries').delete().eq('id', id);
+    wllAllEntries = wllAllEntries.filter(e => e.id !== id);
+    hideLoading(); hm('m-wle'); renderWllList();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+// ============================================================
 // 工数
 // ============================================================
 function renderWorkload() {
@@ -2158,6 +2334,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 .btn-full{width:100%;padding:8px;font-size:13px;margin-top:3px}
 .bal-grp-btn{padding:4px 12px;font-size:12px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
 .bal-grp-btn.on{background:#1a1a18;color:#fff;border-color:#1a1a18}
+.wl-sub-tab{padding:6px 14px;font-size:12px;cursor:pointer;border:none;background:none;color:#888;border-bottom:2px solid transparent;margin-bottom:-0.5px}
+.wl-sub-tab.on{color:#1a1a18;border-bottom-color:#1a1a18;font-weight:500}
+.wl-sub-tab:hover:not(.on){color:#1a1a18}
 .bal-member-btn{padding:3px 10px;font-size:11px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
 .bal-member-btn.on{background:#378add;color:#fff;border-color:#378add}
 .bal-tooltip{position:absolute;background:#1a1a18;color:#fff;font-size:11px;padding:5px 9px;border-radius:6px;pointer-events:none;white-space:nowrap;display:none;z-index:10;transform:translateX(-50%)}
@@ -2238,14 +2417,64 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 
   <!-- Workload -->
   <div id="sec-workload" class="section">
-    <div class="month-nav">
-      <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
-      <div class="month-title" id="mt3"></div>
-      <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
-      <select class="vsel" id="wl-vsel" onchange="switchViewMember('wl-vsel')" style="display:none"></select>
-      <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
+    <!-- サブタブ -->
+    <div style="display:flex;gap:2px;border-bottom:0.5px solid rgba(0,0,0,.1);margin-bottom:1rem">
+      <button class="wl-sub-tab on" id="wl-sub-summary" onclick="wlSubTab('summary',this)">月次集計</button>
+      <button class="wl-sub-tab" id="wl-sub-list" onclick="wlSubTab('list',this)">一覧・編集</button>
     </div>
-    <div class="wlw"><table class="wlt" id="wl-table"></table></div>
+
+    <!-- 月次集計 -->
+    <div id="wl-pane-summary">
+      <div class="month-nav">
+        <button onclick="cm(-1)"><i class="ti ti-chevron-left"></i></button>
+        <div class="month-title" id="mt3"></div>
+        <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
+        <select class="vsel" id="wl-vsel" onchange="switchViewMember('wl-vsel')" style="display:none"></select>
+        <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
+      </div>
+      <div class="wlw"><table class="wlt" id="wl-table"></table></div>
+    </div>
+
+    <!-- 一覧・編集 -->
+    <div id="wl-pane-list" style="display:none">
+      <!-- フィルターバー -->
+      <div style="background:#f5f5f3;border-radius:10px;padding:.75rem 1rem;margin-bottom:1rem;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+        <input type="date" id="wll-from" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+        <span style="font-size:11px;color:#888">〜</span>
+        <input type="date" id="wll-to" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+        <select id="wll-biz" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+          <option value="all">事業区分：全て</option>
+        </select>
+        <select id="wll-work" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+          <option value="all">作業区分：全て</option>
+        </select>
+        <div style="position:relative">
+          <input type="text" id="wll-proj" placeholder="案件で絞り込み..." style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff;width:160px"
+            oninput="filterWllProj()" onfocus="filterWllProj()" onblur="setTimeout(()=>hideWllProj(),200)">
+          <div id="wll-proj-suggest" style="display:none;position:absolute;top:100%;left:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1);min-width:200px"></div>
+        </div>
+        <button class="btn btn-p" onclick="renderWllList()" style="font-size:12px">絞り込み</button>
+        <button class="btn" onclick="resetWllFilter()" style="font-size:12px">リセット</button>
+        <span style="font-size:11px;color:#888;margin-left:auto" id="wll-count"></span>
+      </div>
+      <!-- 一覧テーブル -->
+      <div style="overflow-x:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:12px" id="wll-table">
+          <thead>
+            <tr style="border-bottom:0.5px solid rgba(0,0,0,.1)">
+              <th style="text-align:left;padding:5px 8px;font-weight:400;color:#888;white-space:nowrap">日付</th>
+              <th style="text-align:left;padding:5px 8px;font-weight:400;color:#888;white-space:nowrap">案件</th>
+              <th style="text-align:left;padding:5px 8px;font-weight:400;color:#888;white-space:nowrap">タスク</th>
+              <th style="text-align:left;padding:5px 8px;font-weight:400;color:#888;white-space:nowrap">事業区分</th>
+              <th style="text-align:left;padding:5px 8px;font-weight:400;color:#888;white-space:nowrap">作業区分</th>
+              <th style="text-align:right;padding:5px 8px;font-weight:400;color:#888">時間</th>
+              <th style="padding:5px 8px"></th>
+            </tr>
+          </thead>
+          <tbody id="wll-tbody"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 
   <!-- Balance -->
@@ -2484,6 +2713,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <div class="mbtns"><button class="btn" onclick="hm('mt')">キャンセル</button><button class="btn btn-p" onclick="saveT()">保存</button></div>
 </div></div>
 
+
+<!-- Workload List Edit Modal -->
+<div id="m-wle" class="mo" style="display:none" onclick="if(event.target===this)hm('m-wle')">
+<div class="mc" onclick="event.stopPropagation()" style="max-width:420px">
+  <h3>工数エントリー編集</h3>
+  <input type="hidden" id="wle-id">
+  <div class="fr"><label>日付</label><input type="date" id="wle-date" disabled style="opacity:.6"></div>
+  <div class="fr"><label>案件</label><input type="text" id="wle-proj"></div>
+  <div class="fr"><label>タスク</label><input type="text" id="wle-task"></div>
+  <div class="fr"><label>事業区分</label><select id="wle-biz"></select></div>
+  <div class="fr"><label>作業区分</label><select id="wle-work"></select></div>
+  <div class="fr"><label>時間（H）</label><input type="number" id="wle-hours" min="0.5" step="0.5"></div>
+  <div class="mbtns">
+    <button class="btn btn-d" onclick="deleteWllEntry()" style="margin-right:auto">削除</button>
+    <button class="btn" onclick="hm('m-wle')">キャンセル</button>
+    <button class="btn btn-p" onclick="saveWllEdit()">保存</button>
+  </div>
+</div></div>
 
 <!-- Paid Modal -->
 <div id="mp" class="mo" style="display:none" onclick="if(event.target===this)hm('mp')">
