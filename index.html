@@ -1615,24 +1615,33 @@ let balGrp = 'all';
 let balAllData = [];  // { date, ym, proj, biz, work, task, h, userId }
 
 async function loadBalanceData() {
-  // 権限範囲内の全メンバーのtask_entriesを取得
   const vm = vMembers();
   const results = await Promise.all(vm.map(async a => {
-    const { data } = await sb.from('task_entries')
-      .select('date, project, task, hours, biz_type, work_type')
-      .eq('user_id', a.id)
-      .order('date');
-    return (data||[]).map(r => ({
-      date: r.date,
-      ym: r.date.slice(0,7),
-      proj: r.project,
-      biz: r.biz_type || 'その他',
-      work: r.work_type || 'その他',
-      task: r.task,
-      h: parseFloat(r.hours),
-      userId: a.id,
-      userName: a.name
-    }));
+    let all = [];
+    let from = 0;
+    const limit = 1000;
+    while (true) {
+      const { data, error } = await sb.from('task_entries')
+        .select('date, project, task, hours, biz_type, work_type')
+        .eq('user_id', a.id)
+        .order('date')
+        .range(from, from + limit - 1);
+      if (error || !data || !data.length) break;
+      all = all.concat(data.map(r => ({
+        date: r.date,
+        ym: r.date.slice(0,7),
+        proj: r.project,
+        biz: r.biz_type || 'その他',
+        work: r.work_type || 'その他',
+        task: r.task,
+        h: parseFloat(r.hours),
+        userId: a.id,
+        userName: a.name
+      })));
+      if (data.length < limit) break;
+      from += limit;
+    }
+    return all;
   }));
   balAllData = results.flat();
 }
