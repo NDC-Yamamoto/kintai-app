@@ -1659,11 +1659,41 @@ function balInitControls() {
     ).join('');
   }
 
-  // 日付初期化
+  // デフォルトは3ヶ月
+  const btn3m = document.querySelector('.bal-grp-btn[onclick*="balSetPeriod(3"]');
+  if (btn3m) balSetPeriod(3, btn3m);
+}
+
+function balSetPeriod(months, btn) {
+  // 期間ボタンのON/OFF
+  document.querySelectorAll('[onclick*="balSetPeriod"]').forEach(b => b.classList.remove('on'));
+  btn.classList.add('on');
+
   const today = new Date();
-  const sixMonthsAgo = new Date(today.getFullYear(), today.getMonth()-5, 1);
-  document.getElementById('bal-from').value = sixMonthsAgo.toISOString().slice(0,10);
-  document.getElementById('bal-to').value = today.toISOString().slice(0,10);
+  const todayStr = today.toISOString().slice(0,10);
+
+  if (months === -1) {
+    // カスタム：日付入力欄を表示
+    document.getElementById('bal-custom-dates').style.display = 'flex';
+    return;
+  }
+
+  document.getElementById('bal-custom-dates').style.display = 'none';
+
+  let fromDate;
+  if (months === 0) {
+    // 全期間：データの最古日を使う
+    if (balAllData.length) {
+      fromDate = balAllData.map(d=>d.date).sort()[0];
+    } else {
+      fromDate = '2024-04-01';
+    }
+  } else {
+    fromDate = new Date(today.getFullYear(), today.getMonth() - months + 1, 1).toISOString().slice(0,10);
+  }
+
+  document.getElementById('bal-from').value = fromDate;
+  document.getElementById('bal-to').value = todayStr;
 }
 
 function balSetGrp(grp, btn) {
@@ -1690,8 +1720,8 @@ function balUpdateProjSel() {
 }
 
 function balFilterData() {
-  const from = document.getElementById('bal-from').value;
-  const to   = document.getElementById('bal-to').value;
+  const from = document.getElementById('bal-from')?.value || '2024-01-01';
+  const to   = document.getElementById('bal-to')?.value || new Date().toISOString().slice(0,10);
   const proj = document.getElementById('bal-proj-sel').value;
   const selectedMembers = [...document.querySelectorAll('.bal-member-btn.on')].map(b => b.dataset.uid);
 
@@ -2071,15 +2101,27 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
         <span style="font-size:11px;color:#888;white-space:nowrap">メンバー</span>
         <div style="display:flex;gap:4px;flex-wrap:wrap" id="bal-member-btns"></div>
       </div>
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
         <span style="font-size:11px;color:#888;white-space:nowrap">案件</span>
         <select id="bal-proj-sel" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff;min-width:140px" onchange="renderBalance()">
           <option value="all">全案件</option>
         </select>
-        <span style="font-size:11px;color:#888;white-space:nowrap;margin-left:8px">期間</span>
-        <input type="date" id="bal-from" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
-        <span style="font-size:11px;color:#888">〜</span>
-        <input type="date" id="bal-to" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span style="font-size:11px;color:#888;white-space:nowrap">期間</span>
+        <div style="display:flex;gap:4px;flex-wrap:wrap">
+          <button class="bal-grp-btn" onclick="balSetPeriod(1,this)">1ヶ月</button>
+          <button class="bal-grp-btn" onclick="balSetPeriod(3,this)">3ヶ月</button>
+          <button class="bal-grp-btn" onclick="balSetPeriod(6,this)">半年</button>
+          <button class="bal-grp-btn" onclick="balSetPeriod(12,this)">1年</button>
+          <button class="bal-grp-btn" onclick="balSetPeriod(0,this)">全期間</button>
+          <button class="bal-grp-btn" onclick="balSetPeriod(-1,this)">カスタム</button>
+        </div>
+        <div id="bal-custom-dates" style="display:none;display:flex;gap:5px;align-items:center">
+          <input type="date" id="bal-from" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+          <span style="font-size:11px;color:#888">〜</span>
+          <input type="date" id="bal-to" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff">
+        </div>
         <button class="btn btn-p" onclick="renderBalance()" style="font-size:12px">表示</button>
       </div>
     </div>
