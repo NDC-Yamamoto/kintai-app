@@ -189,7 +189,7 @@ async function apiAddPaidUsage(grantId, userId, date, days) {
 /** マスタ **/
 async function apiFetchMaster() {
   const [{ data: projs }, { data: tasks }, { data: bizTypes }, { data: workTypes }] = await Promise.all([
-    sb.from('projects').select('id, name').order('name'),
+    sb.from('projects').select('id, name, status').order('name'),
     sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id'),
     sb.from('biz_types').select('*').order('sort_order'),
     sb.from('work_types').select('*').order('sort_order')
@@ -223,7 +223,12 @@ async function apiDeleteTemplate(id) {
 }
 
 async function apiAddProject(name) {
-  const { error } = await sb.from('projects').insert({ name, created_by: me?.id });
+  const { error } = await sb.from('projects').insert({ name, created_by: me?.id, status: '営業中' });
+  if (error) throw error;
+}
+
+async function apiUpdateProjectStatus(name, status) {
+  const { error } = await sb.from('projects').update({ status }).eq('name', name);
   if (error) throw error;
 }
 
@@ -889,11 +894,36 @@ async function delAcct() {
 // ============================================================
 // マスタ
 // ============================================================
+const STATUS_COLOR = {'営業中':'#faeeda','導入中':'#e6f1fb','保守中':'#eaf3de','失注':'#f1efe8','その他':'#eeedfe'};
+const STATUS_TEXT  = {'営業中':'#854f0b','導入中':'#0c447c','保守中':'#3b6d11','失注':'#888','その他':'#3c3489'};
+const STATUS_LIST  = ['営業中','導入中','保守中','失注','その他'];
+
 function renderMaster() {
   const raw = master.projectsRaw || [];
-  document.getElementById('proj-list').innerHTML = raw.map(p =>
-    `<div class="mtag">${p.name}<span class="x" onclick="delProj('${p.name}')">×</span></div>`
-  ).join('');
+
+  // ステータス別にグループ化
+  const grouped = {};
+  STATUS_LIST.forEach(s => { grouped[s] = []; });
+  raw.forEach(p => { const s = p.status || '保守中'; if(grouped[s]) grouped[s].push(p); });
+
+  let html = '';
+  STATUS_LIST.forEach(status => {
+    if(!grouped[status].length) return;
+    html += `<div style="margin-bottom:.75rem">
+      <div style="font-size:11px;font-weight:500;padding:2px 8px;border-radius:10px;display:inline-block;margin-bottom:5px;background:${STATUS_COLOR[status]};color:${STATUS_TEXT[status]}">${status}（${grouped[status].length}件）</div>
+      <div style="display:flex;flex-wrap:wrap;gap:4px">
+        ${grouped[status].map(p => `
+          <div style="display:flex;align-items:center;gap:4px;padding:3px 8px;border:0.5px solid rgba(0,0,0,.15);border-radius:8px;background:#f5f5f3;font-size:12px">
+            <span>${p.name}</span>
+            <select onchange="updateProjStatus('${p.name}',this.value)" style="font-size:10px;border:none;background:transparent;color:#888;cursor:pointer;padding:0">
+              ${STATUS_LIST.map(s => `<option value="${s}" ${s===status?'selected':''}>${s}</option>`).join('')}
+            </select>
+            <span style="cursor:pointer;color:#aaa;font-size:12px" onclick="delProj('${p.name}')">×</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+  });
+  document.getElementById('proj-list').innerHTML = html;
   document.getElementById('task-mlist').innerHTML = master.tasks.map((t,i) =>
     `<div class="mtag"><span style="color:var(--color-text-secondary);font-size:9px;margin-right:2px">${t.proj||''}</span>${t.name}<span class="x" onclick="delTaskM('${t.name}','${t.proj}')">×</span></div>`
   ).join('');
@@ -970,6 +1000,14 @@ async function addProj() {
     document.getElementById('np').value=''; renderMaster();
   }
   catch(e) { showError(e.message); }
+}
+
+async function updateProjStatus(name, status) {
+  try {
+    await apiUpdateProjectStatus(name, status);
+    const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[];
+    renderMaster();
+  } catch(e) { showError(e.message); }
 }
 async function delProj(name) {
   try { await apiDeleteProject(name); const m = await apiFetchMaster(); master=m; projectsCache=m.projectsRaw||[]; renderMaster(); }
@@ -1711,24 +1749,45 @@ function balToggleMember(btn) {
 
 function balUpdateProjSel() {
   const sel = document.getElementById('bal-proj-sel');
+  const statusSel = document.getElementById('bal-status-sel')?.value || 'all';
+  const raw = master.projectsRaw || [];
+  const statusMap = {};
+  raw.forEach(p => { statusMap[p.name] = p.status || '保守中'; });
+
   const projs = [...new Set(balAllData
-    .filter(d => balGrp === 'all' || d.biz === balGrp)
+    .filter(d => {
+      if (balGrp !== 'all' && d.biz !== balGrp) return false;
+      if (statusSel !== 'all' && statusMap[d.proj] !== statusSel) return false;
+      // 失注は除外
+      if (statusMap[d.proj] === '失注') return false;
+      return true;
+    })
     .map(d => d.proj)
   )].sort((a,b) => a.localeCompare(b,'ja'));
+
   sel.innerHTML = '<option value="all">全案件</option>' +
-    projs.map(p => `<option value="${p}">${p}</option>`).join('');
+    projs.map(p => {
+      const s = statusMap[p] || '';
+      return `<option value="${p}">${p}${s ? ' ('+s+')' : ''}</option>`;
+    }).join('');
 }
 
 function balFilterData() {
   const from = document.getElementById('bal-from')?.value || '2024-01-01';
   const to   = document.getElementById('bal-to')?.value || new Date().toISOString().slice(0,10);
   const proj = document.getElementById('bal-proj-sel').value;
+  const statusSel = document.getElementById('bal-status-sel')?.value || 'all';
   const selectedMembers = [...document.querySelectorAll('.bal-member-btn.on')].map(b => b.dataset.uid);
+  const raw = master.projectsRaw || [];
+  const statusMap = {};
+  raw.forEach(p => { statusMap[p.name] = p.status || '保守中'; });
 
   return balAllData.filter(d => {
     if (d.date < from || d.date > to) return false;
     if (balGrp !== 'all' && d.biz !== balGrp) return false;
     if (proj !== 'all' && d.proj !== proj) return false;
+    if (statusSel !== 'all' && statusMap[d.proj] !== statusSel) return false;
+    if (statusMap[d.proj] === '失注') return false;
     if (selectedMembers.length && !selectedMembers.includes(d.userId)) return false;
     return true;
   });
@@ -2180,7 +2239,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
         <div style="display:flex;gap:4px;flex-wrap:wrap" id="bal-member-btns"></div>
       </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-        <span style="font-size:11px;color:#888;white-space:nowrap">案件</span>
+        <span style="font-size:11px;color:#888;white-space:nowrap">ステータス</span>
+        <select id="bal-status-sel" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff" onchange="balUpdateProjSel();renderBalance()">
+          <option value="all">全ステータス</option>
+          <option value="営業中">営業中</option>
+          <option value="導入中">導入中</option>
+          <option value="保守中">保守中</option>
+          <option value="その他">その他</option>
+        </select>
+        <span style="font-size:11px;color:#888;white-space:nowrap;margin-left:4px">案件</span>
         <select id="bal-proj-sel" style="font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px;background:#fff;min-width:140px" onchange="renderBalance()">
           <option value="all">全案件</option>
         </select>
