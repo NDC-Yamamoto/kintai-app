@@ -165,6 +165,25 @@ async function apiSaveTaskEntries(userId, date, entries) {
     }));
     const { error } = await sb.from('task_entries').insert(rows);
     if (error) throw error;
+
+    // projectsのlast_biz_type/last_work_typeを更新
+    const projUpdates = {};
+    entries.forEach(e => {
+      if (e.biz_type || e.work_type) {
+        projUpdates[e.proj] = { last_biz_type: e.biz_type, last_work_type: e.work_type };
+      }
+    });
+    await Promise.all(Object.entries(projUpdates).map(([name, vals]) =>
+      sb.from('projects').update(vals).eq('name', name)
+    ));
+    // キャッシュを更新
+    const raw = master.projectsRaw || [];
+    raw.forEach(p => {
+      if (projUpdates[p.name]) {
+        p.last_biz_type = projUpdates[p.name].last_biz_type;
+        p.last_work_type = projUpdates[p.name].last_work_type;
+      }
+    });
   }
 }
 
@@ -189,7 +208,7 @@ async function apiAddPaidUsage(grantId, userId, date, days) {
 /** マスタ **/
 async function apiFetchMaster() {
   const [{ data: projs }, { data: tasks }, { data: bizTypes }, { data: workTypes }] = await Promise.all([
-    sb.from('projects').select('id, name, status').order('name'),
+    sb.from('projects').select('id, name, status, last_biz_type, last_work_type').order('name'),
     sb.from('tasks_master').select('id, project_id, name, projects(name)').order('id'),
     sb.from('biz_types').select('*').order('sort_order'),
     sb.from('work_types').select('*').order('sort_order')
@@ -1164,6 +1183,14 @@ function selectProj(name) {
   document.getElementById('ta-proj-input').value = name;
   hideProjSuggest();
   updTS(name);
+
+  // projectsRawからlast_biz_type/last_work_typeを自動セット
+  const raw = master.projectsRaw || [];
+  const proj = raw.find(p => p.name === name);
+  if (proj) {
+    if (proj.last_biz_type) document.getElementById('ta-biz').value = proj.last_biz_type;
+    if (proj.last_work_type) document.getElementById('ta-work').value = proj.last_work_type;
+  }
 }
 
 function hideProjSuggest() {
