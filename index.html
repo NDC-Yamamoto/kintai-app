@@ -1574,6 +1574,29 @@ async function savePaid() {
   } catch(e) { hideLoading(); showError(e.message); }
 }
 
+function calcKintaiTime() {
+  const s = document.getElementById('mk-s').value;
+  const e = document.getElementById('mk-e').value;
+  const b = parseInt(document.getElementById('mk-b').value) || 60;
+  const el = document.getElementById('mk-calc');
+  const sub = document.getElementById('mk-calc-sub');
+  if (!el) return;
+  if (!s || !e) { el.textContent = '—'; if(sub) sub.textContent = ''; return; }
+  const sh = parseInt(s)*60 + parseInt(s.slice(3));
+  const eh = parseInt(e)*60 + parseInt(e.slice(3));
+  const total = Math.max(0, eh - sh - b);
+  const h = Math.floor(total/60);
+  const m = total % 60;
+  el.textContent = `${h}時間${m>0?m+'分':''}`;
+  const over = total - 8*60;
+  if (!sub) return;
+  sub.textContent = over > 0
+    ? `（所定+${Math.floor(over/60)}時間${over%60>0?over%60+'分':''}）`
+    : over < 0 ? `（所定-${Math.floor(Math.abs(over)/60)}時間${Math.abs(over)%60>0?Math.abs(over)%60+'分':''}）`
+    : '（所定通り）';
+  sub.style.color = over > 0 ? '#a32d2d' : over < 0 ? '#0f6e56' : '#888';
+}
+
 function hm(id) { document.getElementById(id).style.display = 'none'; }
 
 // ============================================================
