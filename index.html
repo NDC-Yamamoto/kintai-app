@@ -2330,11 +2330,16 @@ async function renderBalance() {
 // 起動（セッション復元）
 // ============================================================
 window.addEventListener('load', async () => {
-  const { data: { session } } = await sb.auth.getSession();
-  if (session) {
-    me = await apiGetMe();
-    if (me) { await initApp(); return; }
+  try {
+    const { data: { session } } = await sb.auth.getSession();
+    if (session) {
+      me = await apiGetMe();
+      if (me) { await initApp(); return; }
+    }
+  } catch(e) {
+    console.error('Session error:', e);
   }
+  hideLoading();
   document.getElementById('pg-login').style.display = 'flex';
 });
 </script>
