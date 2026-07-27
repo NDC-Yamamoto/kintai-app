@@ -1865,13 +1865,11 @@ function buildHmCells(records) {
   }
 
   let lastM=-1, mRow='', cols='';
-  weeks.forEach(wk => {
+  weeks.forEach((wk,wi) => {
     const m = wk[0].d.getMonth();
     if (m !== lastM) {
-      mRow += `<div style="width:16px;font-size:10px;color:#aaa">${m+1}月</div>`;
+      mRow += `<div style="position:absolute;left:${wi*16}px;top:0;width:28px;white-space:nowrap;font-size:10px;color:#aaa">${m+1}月</div>`;
       lastM = m;
-    } else {
-      mRow += `<div style="width:16px"></div>`;
     }
     let col = '';
     wk.forEach(day => {
@@ -1887,7 +1885,7 @@ function buildHmCells(records) {
       ${['月','','水','','金','','日'].map(d=>`<div style="font-size:9px;color:#aaa;height:13px;display:flex;align-items:center">${d}</div>`).join('')}
     </div>
     <div>
-      <div style="display:flex;gap:3px;margin-bottom:4px">${mRow}</div>
+      <div style="position:relative;height:14px;margin-bottom:4px">${mRow}</div>
       <div style="display:flex;gap:3px">${cols}</div>
     </div>
   </div>`;
