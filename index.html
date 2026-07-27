@@ -1780,6 +1780,10 @@ async function renderInsight() {
         <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">灰線＝所定労働時間（稼働日数×8H）</div>
         <svg id="bar-chart-svg" viewBox="0 0 640 160" style="width:100%;display:block" preserveAspectRatio="none"></svg>
 
+        <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">月次超過稼働時間（全期間）</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">稼働日数の違いを除いた「所定を超えた分」だけを表示（マイナスは所定未満）</div>
+        <svg id="overtime-chart-svg" viewBox="0 0 640 130" style="width:100%;display:block" preserveAspectRatio="none"></svg>
+
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">日別稼働時間</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:.75rem" id="ins-month-btns"></div>
         <svg id="daily-chart-svg" viewBox="0 0 640 110" style="width:100%;display:block" preserveAspectRatio="none"></svg>
@@ -1808,6 +1812,7 @@ async function renderInsight() {
 
     // 棒グラフ描画
     drawBarChart(barData);
+    drawOvertimeChart(barData);
     // 日別グラフ
     insMonthData = monthMap;
     insMonths = months;
@@ -1935,6 +1940,39 @@ function drawBarChart(barData) {
   });
 
   svg.innerHTML=html;
+}
+
+function drawOvertimeChart(barData) {
+  const svg = document.getElementById('overtime-chart-svg');
+  if (!svg) return;
+  const W=640,H=130,pL=40,pR=10,pT=10,pB=32;
+  const cW=W-pL-pR, cH=H-pT-pB;
+  const overtimes = barData.map(d => Math.round((d.total - d.so)*10)/10);
+  const maxV = Math.max(...overtimes, 10);
+  const minV = Math.min(...overtimes, -10);
+  const zeroY = pT + (1 - (0 - minV)/(maxV - minV)) * cH;
+  const yS = v => pT + (1 - (v - minV)/(maxV - minV)) * cH;
+  const n = barData.length, barW = cW/n;
+  let html = '';
+
+  // ゼロライン
+  html += `<line x1="${pL}" y1="${zeroY}" x2="${W-pR}" y2="${zeroY}" stroke="#ccc" stroke-width="1"/>`;
+  html += `<text x="${pL-3}" y="${zeroY+3}" font-size="9" fill="#aaa" text-anchor="end">0</text>`;
+
+  barData.forEach((d,i) => {
+    const ot = overtimes[i];
+    const x = pL + i*barW + barW*0.1;
+    const bw = barW*0.8;
+    const y = ot >= 0 ? yS(ot) : zeroY;
+    const bh = Math.abs(yS(ot) - zeroY);
+    const color = ot > 0 ? '#e24b4a' : ot < 0 ? '#378add' : '#ccc';
+    html += `<rect x="${x}" y="${y}" width="${bw}" height="${Math.max(bh,1)}" fill="${color}" rx="2" opacity="0.85"/>`;
+    if (n<=12 || (i%3===0 || i===n-1)) {
+      html += `<text x="${x+bw/2}" y="${H-pB+13}" font-size="8" fill="#aaa" text-anchor="middle">${d.label}</text>`;
+    }
+  });
+
+  svg.innerHTML = html;
 }
 
 function buildInsMonthBtns(months, monthMap) {
