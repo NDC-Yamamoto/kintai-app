@@ -1741,6 +1741,7 @@ async function renderInsight() {
 
     // ヒートマップ
     const hmCells = buildHmCells(allKintai);
+    const overtimeHmCells = buildOvertimeHmCells(allKintai);
 
     // 月次棒グラフデータ
     const barData = months.map(ym => ({
@@ -1774,6 +1775,15 @@ async function renderInsight() {
           少ない
           ${['#e6f1fb','#85b7eb','#378add','#0c447c'].map(c=>`<div style="width:13px;height:13px;border-radius:2px;background:${c}"></div>`).join('')}
           多い
+        </div>
+
+        <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">超過稼働カレンダー（直近1年）</div>
+        <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">赤いほど所定8Hを超過 / 青いほど所定未満 / グレーは休日</div>
+        <div id="hm-overtime-container">${overtimeHmCells}</div>
+        <div style="display:flex;align-items:center;gap:5px;margin-top:7px;font-size:11px;color:#888">
+          所定未満
+          ${['#b5d4f4','#f1efe8','#fbdada','#f5a3a2','#e8615f','#a32d2d'].map(c=>`<div style="width:13px;height:13px;border-radius:2px;background:${c}"></div>`).join('')}
+          超過
         </div>
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">月次稼働時間（全期間）</div>
@@ -1837,30 +1847,7 @@ async function renderInsight() {
 
 let insMonthData = {}, insMonths = [];
 
-function buildHmCells(records) {
-  const recMap = {};
-  records.forEach(r => {
-    if (r.start_time && r.end_time) {
-      const s=r.start_time.slice(0,5),e=r.end_time.slice(0,5);
-      const sh=parseInt(s)*60+parseInt(s.slice(3));
-      const eh=parseInt(e)*60+parseInt(e.slice(3));
-      const h=Math.max(0,(eh-sh-(r.break_min||60))/60);
-      recMap[r.date] = h;
-    } else {
-      recMap[r.date] = 0;
-    }
-  });
-
-  function hmColor(h) {
-    if (h <= 0) return '#e1e0d9';
-    if (h < 7)  return '#e6f1fb';
-    if (h < 8)  return '#b5d4f4';
-    if (h < 9)  return '#85b7eb';
-    if (h < 10) return '#378add';
-    if (h < 11) return '#185fa5';
-    return '#0c447c';
-  }
-
+function buildYearWeeks(recMap) {
   const today = new Date();
   const start = new Date(today.getFullYear()-1, today.getMonth(), today.getDate());
   let cur = new Date(start);
@@ -1877,7 +1864,10 @@ function buildHmCells(records) {
     cur.setDate(cur.getDate()+1);
     if (week.length === 7 || (cur > today && week.length)) { weeks.push(week); week=[]; }
   }
+  return weeks;
+}
 
+function renderHmGrid(weeks, colorFn, titleFn) {
   let lastM=-1, mRow='', cols='';
   weeks.forEach((wk,wi) => {
     const m = wk[0].d.getMonth();
@@ -1887,9 +1877,10 @@ function buildHmCells(records) {
     }
     let col = '';
     wk.forEach(day => {
-      const bg = day.inRange && day.h >= 0 ? hmColor(day.h) : 'transparent';
+      const bg = day.inRange && day.h >= 0 ? colorFn(day.h) : 'transparent';
       const titleDate = dk(day.d.getFullYear(), day.d.getMonth()+1, day.d.getDate());
-      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" title="${day.inRange?titleDate+(day.h>0?' '+day.h.toFixed(1)+'H':''):''}"></div>`;
+      const title = day.inRange ? titleDate + titleFn(day.h) : '';
+      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" title="${title}"></div>`;
     });
     cols += `<div style="display:flex;flex-direction:column;gap:3px">${col}</div>`;
   });
@@ -1903,6 +1894,66 @@ function buildHmCells(records) {
       <div style="display:flex;gap:3px">${cols}</div>
     </div>
   </div>`;
+}
+
+function hmColorByHours(h) {
+  if (h <= 0) return '#e1e0d9';
+  if (h < 7)  return '#e6f1fb';
+  if (h < 8)  return '#b5d4f4';
+  if (h < 9)  return '#85b7eb';
+  if (h < 10) return '#378add';
+  if (h < 11) return '#185fa5';
+  return '#0c447c';
+}
+
+function hmColorByOvertime(h) {
+  if (h <= 0) return '#e1e0d9';        // 記録なし・休日
+  const ot = h - 8;
+  if (ot <= -1) return '#b5d4f4';      // 所定より1H以上少ない
+  if (ot < 0)   return '#e6f1fb';      // 所定よりやや少ない
+  if (ot === 0) return '#f1efe8';      // ちょうど所定
+  if (ot < 1)   return '#fbdada';
+  if (ot < 2)   return '#f5a3a2';
+  if (ot < 3)   return '#e8615f';
+  return '#a32d2d';                    // 3H以上の超過
+}
+
+function buildHmCells(records) {
+  const recMap = {};
+  records.forEach(r => {
+    if (r.start_time && r.end_time) {
+      const s=r.start_time.slice(0,5),e=r.end_time.slice(0,5);
+      const sh=parseInt(s)*60+parseInt(s.slice(3));
+      const eh=parseInt(e)*60+parseInt(e.slice(3));
+      const h=Math.max(0,(eh-sh-(r.break_min||60))/60);
+      recMap[r.date] = h;
+    } else {
+      recMap[r.date] = 0;
+    }
+  });
+  const weeks = buildYearWeeks(recMap);
+  return renderHmGrid(weeks, hmColorByHours, h => h>0 ? ' '+h.toFixed(1)+'H' : '');
+}
+
+function buildOvertimeHmCells(records) {
+  const recMap = {};
+  records.forEach(r => {
+    if (r.start_time && r.end_time) {
+      const s=r.start_time.slice(0,5),e=r.end_time.slice(0,5);
+      const sh=parseInt(s)*60+parseInt(s.slice(3));
+      const eh=parseInt(e)*60+parseInt(e.slice(3));
+      const h=Math.max(0,(eh-sh-(r.break_min||60))/60);
+      recMap[r.date] = h;
+    } else {
+      recMap[r.date] = 0;
+    }
+  });
+  const weeks = buildYearWeeks(recMap);
+  return renderHmGrid(weeks, hmColorByOvertime, h => {
+    if (h<=0) return '';
+    const ot = Math.round((h-8)*10)/10;
+    return ot>=0 ? ` +${ot}H` : ` ${ot}H`;
+  });
 }
 
 function attachChartHover(svg, tipEl, W, H, items, formatFn) {
