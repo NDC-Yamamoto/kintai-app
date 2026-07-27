@@ -1770,7 +1770,10 @@ async function renderInsight() {
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:.875rem 0 .375rem">稼働カレンダー（直近1年）</div>
         <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">濃いほど長時間稼働 / グレーは休日</div>
-        <div id="hm-container">${hmCells}</div>
+        <div class="bal-chart-wrap">
+          <div id="hm-container">${hmCells}</div>
+          <div class="bal-tooltip" id="hm-tip"></div>
+        </div>
         <div style="display:flex;align-items:center;gap:5px;margin-top:7px;font-size:11px;color:#888">
           少ない
           ${['#e6f1fb','#85b7eb','#378add','#0c447c'].map(c=>`<div style="width:13px;height:13px;border-radius:2px;background:${c}"></div>`).join('')}
@@ -1779,7 +1782,10 @@ async function renderInsight() {
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">超過稼働カレンダー（直近1年）</div>
         <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">赤いほど所定8Hを超過 / 青いほど所定未満 / グレーは休日</div>
-        <div id="hm-overtime-container">${overtimeHmCells}</div>
+        <div class="bal-chart-wrap">
+          <div id="hm-overtime-container">${overtimeHmCells}</div>
+          <div class="bal-tooltip" id="hm-overtime-tip"></div>
+        </div>
         <div style="display:flex;align-items:center;gap:5px;margin-top:7px;font-size:11px;color:#888">
           所定未満
           ${['#b5d4f4','#f1efe8','#fbdada','#f5a3a2','#e8615f','#a32d2d'].map(c=>`<div style="width:13px;height:13px;border-radius:2px;background:${c}"></div>`).join('')}
@@ -1832,6 +1838,8 @@ async function renderInsight() {
     // 棒グラフ描画
     drawBarChart(barData);
     drawOvertimeChart(barData);
+    attachHmHover(document.getElementById('hm-container'), document.getElementById('hm-tip'));
+    attachHmHover(document.getElementById('hm-overtime-container'), document.getElementById('hm-overtime-tip'));
     // 日別グラフ
     insMonthData = monthMap;
     insMonths = months;
@@ -1879,8 +1887,8 @@ function renderHmGrid(weeks, colorFn, titleFn) {
     wk.forEach(day => {
       const bg = day.inRange && day.h >= 0 ? colorFn(day.h) : 'transparent';
       const titleDate = dk(day.d.getFullYear(), day.d.getMonth()+1, day.d.getDate());
-      const title = day.inRange ? titleDate + titleFn(day.h) : '';
-      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" title="${title}"></div>`;
+      const tip = day.inRange ? titleDate + titleFn(day.h) : '';
+      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" ${tip?`data-hmtip="${tip.replace(/"/g,'&quot;')}"`:''}></div>`;
     });
     cols += `<div style="display:flex;flex-direction:column;gap:3px">${col}</div>`;
   });
@@ -1894,6 +1902,23 @@ function renderHmGrid(weeks, colorFn, titleFn) {
       <div style="display:flex;gap:3px">${cols}</div>
     </div>
   </div>`;
+}
+
+function attachHmHover(containerEl, tipEl) {
+  if (!containerEl || !tipEl) return;
+  containerEl.addEventListener('mousemove', e => {
+    const cell = e.target.closest('[data-hmtip]');
+    if (cell) {
+      const rect = containerEl.getBoundingClientRect();
+      tipEl.style.display = 'block';
+      tipEl.innerHTML = cell.getAttribute('data-hmtip');
+      tipEl.style.left = (e.clientX - rect.left) + 'px';
+      tipEl.style.top = Math.max(0, (e.clientY - rect.top - 45)) + 'px';
+    } else {
+      tipEl.style.display = 'none';
+    }
+  });
+  containerEl.addEventListener('mouseleave', () => { tipEl.style.display = 'none'; });
 }
 
 function hmColorByHours(h) {
