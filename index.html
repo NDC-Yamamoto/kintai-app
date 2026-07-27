@@ -114,7 +114,8 @@ async function apiFetchKintai(userId, year, month) {
       breakMin: r.break_min,
       remote: r.is_remote,
       trip: r.loc_trip,
-      umeda: r.loc_umeda
+      umeda: r.loc_umeda,
+      paidHour: r.paid_hour ? parseFloat(r.paid_hour) : 0
     };
   });
   return map;
@@ -131,7 +132,8 @@ async function apiSaveKintai(userId, date, entry) {
     is_remote: !!entry.remote,
     loc_remote: !!entry.remote,
     loc_trip: !!entry.trip,
-    loc_umeda: !!entry.umeda
+    loc_umeda: !!entry.umeda,
+    paid_hour: entry.paidHour || 0
   };
   const { error } = await sb.from('kintai_records').upsert(record, { onConflict: 'user_id,date' });
   if (error) throw error;
@@ -189,22 +191,57 @@ async function apiSaveTaskEntries(userId, date, entries) {
   }
 }
 
-/** 有給 **/
-async function apiFetchPaid(userId) {
-  const { data: grants } = await sb.from('paid_grants').select('*, paid_usages(*)').eq('user_id', userId).order('grant_date');
-  return (grants || []).map(g => ({
-    id: g.id,
-    year: g.year_label,
-    grantDate: g.grant_date,
-    prev: parseFloat(g.prev_days),
-    granted: parseFloat(g.granted_days),
-    entries: (g.paid_usages || []).map(u => ({ id: u.id, date: u.date, days: parseFloat(u.days) }))
-  }));
-}
+/** 有給（勤怠カレンダーの記録から自動集計） **/
+async function apiFetchLeaveUsage(userId) {
+  let all = [], offset = 0;
+  while (true) {
+    const { data, error } = await sb.from('kintai_records')
+      .select('date, type, paid_hour')
+      .eq('user_id', userId)
+      .in('type', ['paid','half'])
+      .order('date')
+      .range(offset, offset + 999);
+    if (error || !data) break;
+    all = all.concat(data);
+    if (data.length < 1000) break;
+    offset += 1000;
+  }
+  // 時間有休はtypeを問わず入っている可能性があるため別途全件から拾う
+  let hourAll = [], hOffset = 0;
+  while (true) {
+    const { data, error } = await sb.from('kintai_records')
+      .select('date, paid_hour')
+      .eq('user_id', userId)
+      .gt('paid_hour', 0)
+      .order('date')
+      .range(hOffset, hOffset + 999);
+    if (error || !data) break;
+    hourAll = hourAll.concat(data);
+    if (data.length < 1000) break;
+    hOffset += 1000;
+  }
 
-async function apiAddPaidUsage(grantId, userId, date, days) {
-  const { error } = await sb.from('paid_usages').insert({ grant_id: grantId, user_id: userId, date, days });
-  if (error) throw error;
+  // year -> month -> { paidDays, halfDays, paidHour }
+  const summary = {};
+  function ensure(y,m) {
+    if (!summary[y]) summary[y] = {};
+    if (!summary[y][m]) summary[y][m] = { paidDays:0, halfDays:0, paidHour:0 };
+    return summary[y][m];
+  }
+  all.forEach(r => {
+    const y = r.date.slice(0,4), m = parseInt(r.date.slice(5,7));
+    const s = ensure(y,m);
+    if (r.type === 'paid') s.paidDays++;
+    if (r.type === 'half') s.halfDays++;
+  });
+  const hourDateSet = new Set();
+  hourAll.forEach(r => {
+    const y = r.date.slice(0,4), m = parseInt(r.date.slice(5,7));
+    const s = ensure(y,m);
+    s.paidHour += parseFloat(r.paid_hour) || 0;
+    hourDateSet.add(r.date);
+  });
+  return summary;
 }
 
 /** マスタ **/
@@ -281,7 +318,7 @@ async function apiDeleteTask(taskName, projName) {
 let accounts = [];
 let kintaiCache = {};   // { userId: { 'YYYY-MM-DD': entry } }
 let tasksCache = {};    // { userId: { 'YYYY-MM-DD': [entries] } }
-let paidCache = {};     // { userId: [grants] }
+
 let master = { projects: [], tasks: [] };
 let paidVM = null;
 
@@ -364,7 +401,7 @@ async function doLogin() {
 async function doLogout() {
   await apiLogout();
   me = null; authUser = null;
-  kintaiCache = {}; tasksCache = {}; paidCache = {};
+  kintaiCache = {}; tasksCache = {};
   document.getElementById('pg-app').style.display = 'none';
   document.getElementById('pg-login').style.display = 'flex';
 }
@@ -954,37 +991,65 @@ function wlToggle(id) {
 }
 
 // ============================================================
-// 有給
+// 有給（勤怠記録からの自動集計。付与・残数は別台帳で管理のため、
+// ここでは「消化日数」の突き合わせ用に月次・年次サマリーのみ表示する）
 // ============================================================
+const PAID_HOUR_DAY = 8;       // 時間有休の日数換算基準（所定8時間＝1日）
+const PAID_HOUR_YEAR_LIMIT = 40; // 就業規則：時間単位年休は年5日(40時間)まで
+
 async function renderPaid() {
   const uid = document.getElementById('paid-vsel')?.value || me.id;
   paidVM = uid;
-  document.getElementById('paid-label').textContent = `${gA(uid)?.name||uid} の有給`;
-  document.getElementById('btn-add-paid').style.display = (me.role==='admin'||me.id===uid) ? '' : 'none';
-  if (!paidCache[uid]) {
-    showLoading('有給データ取得中...');
-    paidCache[uid] = await apiFetchPaid(uid);
-    hideLoading();
+  document.getElementById('paid-label').textContent = `${gA(uid)?.name||uid} の有給消化状況`;
+
+  showLoading('有給データ取得中...');
+  let summary = {};
+  try {
+    summary = await apiFetchLeaveUsage(uid);
+  } catch(e) { showError(e.message); }
+  hideLoading();
+
+  const years = Object.keys(summary).sort((a,b)=>b.localeCompare(a)); // 新しい年が上
+  if (!years.length) {
+    document.getElementById('paid-content').innerHTML = '<div style="color:var(--color-text-secondary);font-size:12px">有給データなし（勤怠カレンダーで「有給」「半休」を記録すると、ここに自動集計されます）</div>';
+    return;
   }
-  const yrs = paidCache[uid] || [];
-  let h='';
-  yrs.forEach(yr => {
-    const total=yr.prev+yr.granted, used=yr.entries.reduce((s,e)=>s+e.days,0), rem=Math.max(0,total-used);
-    h+=`<div class="paid-card">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px">
-        <div style="font-size:13px;font-weight:500">${yr.year}</div>
-        <div style="font-size:11px;color:var(--color-text-secondary)">残 <strong style="color:var(--color-text-primary)">${rem}</strong>日</div>
-      </div>
-      <div class="pbar-row"><div class="pbar-l">付与計</div><div class="pbar-bg"><div class="pbar-f" style="width:${total>0?100:0}%"></div></div><div class="pbar-v">${total}日</div></div>
-      <div class="pbar-row"><div class="pbar-l">取得済</div><div class="pbar-bg"><div class="pbar-f u" style="width:${total>0?Math.min(100,Math.round(used/total*100)):0}%"></div></div><div class="pbar-v">${used}日</div></div>`;
-    if(yr.entries.length) {
-      h+=`<div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 18px;font-size:11px;margin-top:7px;padding-top:7px;border-top:0.5px solid var(--color-border-tertiary)">`;
-      yr.entries.forEach(e => { h+=`<div style="display:flex;justify-content:space-between;padding:2px 0;color:var(--color-text-secondary)"><span>${e.date}</span><span style="font-weight:500;color:var(--color-text-primary)">${e.days}日</span></div>`; });
-      h+=`</div>`;
+
+  let h = '';
+  years.forEach(y => {
+    const months = summary[y];
+    let yearPaidDays=0, yearHalfDays=0, yearPaidHour=0;
+    let rows = '';
+    for (let m=1; m<=12; m++) {
+      const d = months[m];
+      if (!d) continue;
+      const hourDays = Math.round((d.paidHour / PAID_HOUR_DAY) * 100) / 100;
+      const monthTotal = Math.round((d.paidDays + d.halfDays*0.5 + hourDays) * 100) / 100;
+      if (d.paidDays===0 && d.halfDays===0 && d.paidHour===0) continue;
+      yearPaidDays += d.paidDays; yearHalfDays += d.halfDays; yearPaidHour += d.paidHour;
+      rows += `<div style="display:grid;grid-template-columns:40px 1fr 1fr 1fr 60px;gap:6px;font-size:11px;padding:4px 0;border-top:0.5px solid var(--color-border-tertiary);align-items:center">
+        <span style="color:var(--color-text-secondary)">${m}月</span>
+        <span>有給 ${d.paidDays}日</span>
+        <span>半休 ${d.halfDays}日</span>
+        <span>時間有休 ${d.paidHour}h${d.paidHour>0?`（${hourDays}日相当）`:''}</span>
+        <span style="text-align:right;font-weight:500">${monthTotal}日</span>
+      </div>`;
     }
-    h+=`</div>`;
+    const yearHourDays = Math.round((yearPaidHour / PAID_HOUR_DAY) * 100) / 100;
+    const yearTotal = Math.round((yearPaidDays + yearHalfDays*0.5 + yearHourDays) * 100) / 100;
+    const hourRemain = Math.max(0, PAID_HOUR_YEAR_LIMIT - yearPaidHour);
+    h += `<div class="paid-card">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:7px">
+        <div style="font-size:13px;font-weight:500">${y}年</div>
+        <div style="font-size:11px;color:var(--color-text-secondary)">年間消化 <strong style="color:var(--color-text-primary)">${yearTotal}</strong>日</div>
+      </div>
+      <div style="font-size:11px;color:var(--color-text-secondary);margin-bottom:6px">
+        時間有休：年間 ${yearPaidHour}h 消化 ／ 上限40hまで残り <strong style="color:${hourRemain<=8?'#A32D2D':'var(--color-text-primary)'}">${hourRemain}h</strong>
+      </div>
+      ${rows}
+    </div>`;
   });
-  document.getElementById('paid-content').innerHTML = h || '<div style="color:var(--color-text-secondary);font-size:12px">有給データなし</div>';
+  document.getElementById('paid-content').innerHTML = h;
 }
 
 // ============================================================
@@ -1315,6 +1380,7 @@ function openKM(k, uid) {
   document.getElementById('mk-r').checked = !!e.remote;
   document.getElementById('mk-trip').checked = !!e.trip;
   document.getElementById('mk-umeda').checked = !!e.umeda;
+  document.getElementById('mk-paidhour').value = e.paidHour || 0;
   calcKintaiTime();
   document.getElementById('mk-del').style.display = (k && md[k]) ? '' : 'none';
   document.getElementById('mk').style.display = 'flex';
@@ -1329,7 +1395,8 @@ async function saveK() {
     breakMin: parseInt(document.getElementById('mk-b').value) || 0,
     remote: document.getElementById('mk-r').checked,
     trip: document.getElementById('mk-trip').checked,
-    umeda: document.getElementById('mk-umeda').checked
+    umeda: document.getElementById('mk-umeda').checked,
+    paidHour: parseFloat(document.getElementById('mk-paidhour').value) || 0
   };
   showLoading('保存中...');
   try {
@@ -1547,50 +1614,29 @@ async function saveT() {
   } catch(e) { hideLoading(); showError(e.message); }
 }
 
-// ============================================================
-// 有給モーダル
-// ============================================================
-function openAddPaid() {
-  const uid = paidVM || me.id;
-  const today = new Date();
-  document.getElementById('mp-d').value = dk(today.getFullYear(), today.getMonth()+1, today.getDate());
-  document.getElementById('mp-d').dataset.uid = uid;
-  const yrs = paidCache[uid] || [];
-  document.getElementById('mp-yr').innerHTML = yrs.map((y,i) => `<option value="${i}" data-gid="${y.id}">${y.year}</option>`).join('');
-  document.getElementById('mp-yr').value = yrs.length - 1;
-  document.getElementById('mp').style.display = 'flex';
-}
-
-async function savePaid() {
-  const uid = document.getElementById('mp-d').dataset.uid || me.id;
-  const date = document.getElementById('mp-d').value;
-  const days = parseFloat(document.getElementById('mp-days').value);
-  const opt = document.getElementById('mp-yr').options[document.getElementById('mp-yr').selectedIndex];
-  const grantId = parseInt(opt?.dataset.gid);
-  if (!date || isNaN(grantId)) return;
-  showLoading('保存中...');
-  try {
-    await apiAddPaidUsage(grantId, uid, date, days);
-    delete paidCache[uid];  // キャッシュ削除して再取得
-    hideLoading(); hm('mp'); renderPaid();
-  } catch(e) { hideLoading(); showError(e.message); }
-}
-
 function calcKintaiTime() {
   const s = document.getElementById('mk-s').value;
   const e = document.getElementById('mk-e').value;
   const b = parseInt(document.getElementById('mk-b').value) || 60;
+  const ph = parseFloat(document.getElementById('mk-paidhour')?.value) || 0;
   const el = document.getElementById('mk-calc');
   const sub = document.getElementById('mk-calc-sub');
   if (!el) return;
-  if (!s || !e) { el.textContent = '—'; if(sub) sub.textContent = ''; return; }
+  if (!s || !e) {
+    if (ph > 0) { el.textContent = `時間有休 ${ph}h`; if(sub) sub.textContent = ''; }
+    else { el.textContent = '—'; if(sub) sub.textContent = ''; }
+    return;
+  }
   const sh = parseInt(s)*60 + parseInt(s.slice(3));
   const eh = parseInt(e)*60 + parseInt(e.slice(3));
   const total = Math.max(0, eh - sh - b);
   const h = Math.floor(total/60);
   const m = total % 60;
-  el.textContent = `${h}時間${m>0?m+'分':''}`;
-  const over = total - 8*60;
+  const withPaid = total + ph*60;
+  el.textContent = ph > 0
+    ? `実働${h}時間${m>0?m+'分':''}　＋　時間有休${ph}h`
+    : `${h}時間${m>0?m+'分':''}`;
+  const over = withPaid - 8*60;
   if (!sub) return;
   sub.textContent = over > 0
     ? `（所定+${Math.floor(over/60)}時間${over%60>0?over%60+'分':''}）`
@@ -2684,7 +2730,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <div style="font-size:12px;color:#888" id="paid-label"></div>
       <div style="display:flex;gap:5px">
         <select class="vsel" id="paid-vsel" onchange="renderPaid()"></select>
-        <button class="btn btn-sm" onclick="openAddPaid()" id="btn-add-paid"><i class="ti ti-plus"></i> 取得追加</button>
       </div>
     </div>
     <div id="paid-content"></div>
@@ -2765,8 +2810,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <h3 id="mk-t">勤怠入力</h3>
   <div class="fr"><label>日付</label><input type="date" id="mk-d"></div>
   <div class="fr"><label>区分</label><select id="mk-type"><option value="work">出勤</option><option value="paid">有給</option><option value="half">半休</option><option value="holiday">祝日</option><option value="remote">在宅</option></select></div>
-  <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s"><input type="time" id="mk-e"></div></div>
-  <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15"></div>
+  <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s" onchange="calcKintaiTime()"><input type="time" id="mk-e" onchange="calcKintaiTime()"></div></div>
+  <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15" onchange="calcKintaiTime()"></div>
+  <div class="fr"><label>時間有休（h）<span style="color:#aaa;font-weight:400">※出勤時刻はそのままに、一部を時間単位で有休処理する場合</span></label><input type="number" id="mk-paidhour" value="0" min="0" max="8" step="0.5" onchange="calcKintaiTime()"></div>
   <div style="background:#f5f5f3;border-radius:8px;padding:.5rem .875rem;font-size:12px;color:#888;margin-bottom:6px">
   稼働時間：<strong id="mk-calc" style="color:#1a1a18;font-size:14px">—</strong>
   <span style="font-size:11px;margin-left:8px" id="mk-calc-sub"></span>
@@ -2848,15 +2894,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   </div>
 </div></div>
 
-<!-- Paid Modal -->
-<div id="mp" class="mo" style="display:none" onclick="if(event.target===this)hm('mp')">
-<div class="mc" onclick="event.stopPropagation()">
-  <h3>有給取得を追加</h3>
-  <div class="fr"><label>日付</label><input type="date" id="mp-d"></div>
-  <div class="fr"><label>取得日数</label><select id="mp-days"><option value="1">1日</option><option value="0.5">0.5日（半休）</option></select></div>
-  <div class="fr"><label>付与年度</label><select id="mp-yr"></select></div>
-  <div class="mbtns"><button class="btn" onclick="hm('mp')">キャンセル</button><button class="btn btn-p" onclick="savePaid()">保存</button></div>
-</div></div>
 
 <!-- Account Modal -->
 <div id="ma" class="mo" style="display:none" onclick="if(event.target===this)hm('ma')">
