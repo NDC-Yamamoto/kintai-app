@@ -1030,7 +1030,7 @@ async function renderPaid() {
       rows += `<div style="display:grid;grid-template-columns:40px 1fr 1fr 1fr 60px;gap:6px;font-size:11px;padding:4px 0;border-top:0.5px solid var(--color-border-tertiary);align-items:center">
         <span style="color:var(--color-text-secondary)">${m}月</span>
         <span>有給 ${d.paidDays}日</span>
-        <span>半休 ${d.halfDays}日</span>
+        <span>半休 ${d.halfDays}件（${d.halfDays*0.5}日）</span>
         <span>時間有休 ${d.paidHour}h${d.paidHour>0?`（${hourDays}日相当）`:''}</span>
         <span style="text-align:right;font-weight:500">${monthTotal}日</span>
       </div>`;
