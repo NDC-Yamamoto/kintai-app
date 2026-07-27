@@ -1654,9 +1654,17 @@ async function renderInsight() {
   showLoading('データを分析中...');
   const uid = me.id;
   try {
-    // 全期間データを取得
-    const { data: allKintai } = await sb.from('kintai_records')
-      .select('*').eq('user_id', uid).order('date');
+    // 全期間データを取得（1000件上限があるためページネーション）
+    let allKintai = [];
+    let ikOffset = 0;
+    while (true) {
+      const { data, error } = await sb.from('kintai_records')
+        .select('*').eq('user_id', uid).order('date').range(ikOffset, ikOffset + 999);
+      if (error || !data || !data.length) break;
+      allKintai = allKintai.concat(data);
+      if (data.length < 1000) break;
+      ikOffset += 1000;
+    }
     if (!allKintai || !allKintai.length) {
       document.getElementById('insight-content').innerHTML =
         '<div style="color:#888;font-size:13px;padding:2rem 0">勤怠データがありません</div>';
