@@ -336,6 +336,7 @@ const TL = { work:'出勤', paid:'有給', half:'半休', holiday:'祝日', remo
 const TB = { work:'bw', paid:'bp', half:'bh', holiday:'bho', remote:'br' };
 
 function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
+function ld(d) { return dk(d.getFullYear(), d.getMonth()+1, d.getDate()); } // ローカル日付文字列（toISOStringのUTCズレ回避）
 function pT(t) { if(!t) return null; const [h,m]=t.split(':').map(Number); return h+m/60; }
 function fH(h) { if(!h) return '0:00'; const hh=Math.floor(h), mm=Math.round((h-hh)*60); return `${hh}:${String(mm).padStart(2,'0')}`; }
 function cW(e) { if(!e||!e.start||!e.end) return 0; return Math.max(0, pT(e.end)-pT(e.start)-(e.breakMin||60)/60); }
@@ -697,8 +698,8 @@ async function initWllList() {
   // デフォルト期間：直近3ヶ月
   const today = new Date();
   const from = new Date(today.getFullYear(), today.getMonth()-2, 1);
-  document.getElementById('wll-from').value = from.toISOString().slice(0,10);
-  document.getElementById('wll-to').value = today.toISOString().slice(0,10);
+  document.getElementById('wll-from').value = ld(from);
+  document.getElementById('wll-to').value = ld(today);
 
   await loadWllEntries();
   renderWllList();
@@ -1855,8 +1856,8 @@ function buildHmCells(records) {
   while (cur <= today || week.length) {
     const d = new Date(cur);
     const inRange = d >= start && d <= today;
-    const dk = d.toISOString().slice(0,10);
-    const h = recMap[dk] ?? -1;
+    const dateKey = dk(d.getFullYear(), d.getMonth()+1, d.getDate());
+    const h = recMap[dateKey] ?? -1;
     week.push({ d, inRange, h });
     cur.setDate(cur.getDate()+1);
     if (week.length === 7 || (cur > today && week.length)) { weeks.push(week); week=[]; }
@@ -1874,7 +1875,8 @@ function buildHmCells(records) {
     let col = '';
     wk.forEach(day => {
       const bg = day.inRange && day.h >= 0 ? hmColor(day.h) : 'transparent';
-      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" title="${day.inRange?day.d.toISOString().slice(0,10)+(day.h>0?' '+day.h.toFixed(1)+'H':''):''}"></div>`;
+      const titleDate = dk(day.d.getFullYear(), day.d.getMonth()+1, day.d.getDate());
+      col += `<div style="width:13px;height:13px;border-radius:2px;background:${bg}" title="${day.inRange?titleDate+(day.h>0?' '+day.h.toFixed(1)+'H':''):''}"></div>`;
     });
     cols += `<div style="display:flex;flex-direction:column;gap:3px">${col}</div>`;
   });
@@ -2072,7 +2074,7 @@ function balSetPeriod(months, btn) {
   btn.classList.add('on');
 
   const today = new Date();
-  const todayStr = today.toISOString().slice(0,10);
+  const todayStr = ld(today);
 
   if (months === -1) {
     // カスタム：日付入力欄を表示
@@ -2091,7 +2093,7 @@ function balSetPeriod(months, btn) {
       fromDate = '2024-04-01';
     }
   } else {
-    fromDate = new Date(today.getFullYear(), today.getMonth() - months + 1, 1).toISOString().slice(0,10);
+    fromDate = ld(new Date(today.getFullYear(), today.getMonth() - months + 1, 1));
   }
 
   document.getElementById('bal-from').value = fromDate;
@@ -2138,7 +2140,7 @@ function balUpdateProjSel() {
 
 function balFilterData() {
   const from = document.getElementById('bal-from')?.value || '2024-01-01';
-  const to   = document.getElementById('bal-to')?.value || new Date().toISOString().slice(0,10);
+  const to   = document.getElementById('bal-to')?.value || ld(new Date());
   const proj = document.getElementById('bal-proj-sel').value;
   const statusSel = document.getElementById('bal-status-sel')?.value || 'all';
   const selectedMembers = [...document.querySelectorAll('.bal-member-btn.on')].map(b => b.dataset.uid);
