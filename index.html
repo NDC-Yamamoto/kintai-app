@@ -1778,15 +1778,24 @@ async function renderInsight() {
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">月次稼働時間（全期間）</div>
         <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">灰線＝所定労働時間（稼働日数×8H）</div>
-        <svg id="bar-chart-svg" viewBox="0 0 640 160" style="width:100%;display:block" preserveAspectRatio="none"></svg>
+        <div class="bal-chart-wrap">
+          <svg id="bar-chart-svg" viewBox="0 0 640 160" style="width:100%;display:block;cursor:pointer" preserveAspectRatio="none"></svg>
+          <div class="bal-tooltip" id="bar-chart-tip"></div>
+        </div>
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">月次超過稼働時間（全期間）</div>
         <div style="font-size:11px;color:#aaa;margin-bottom:.625rem">稼働日数の違いを除いた「所定を超えた分」だけを表示（マイナスは所定未満）</div>
-        <svg id="overtime-chart-svg" viewBox="0 0 640 130" style="width:100%;display:block" preserveAspectRatio="none"></svg>
+        <div class="bal-chart-wrap">
+          <svg id="overtime-chart-svg" viewBox="0 0 640 130" style="width:100%;display:block;cursor:pointer" preserveAspectRatio="none"></svg>
+          <div class="bal-tooltip" id="overtime-chart-tip"></div>
+        </div>
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">日別稼働時間</div>
         <div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:.75rem" id="ins-month-btns"></div>
-        <svg id="daily-chart-svg" viewBox="0 0 640 110" style="width:100%;display:block" preserveAspectRatio="none"></svg>
+        <div class="bal-chart-wrap">
+          <svg id="daily-chart-svg" viewBox="0 0 640 110" style="width:100%;display:block;cursor:pointer" preserveAspectRatio="none"></svg>
+          <div class="bal-tooltip" id="daily-chart-tip"></div>
+        </div>
         <div style="font-size:11px;color:#888;margin-top:.375rem" id="ins-daily-summary"></div>
 
         <div style="font-size:12px;font-weight:500;color:#888;margin:1.25rem 0 .375rem">在宅 / 出張（月別）</div>
@@ -1896,6 +1905,28 @@ function buildHmCells(records) {
   </div>`;
 }
 
+function attachChartHover(svg, tipEl, W, H, items, formatFn) {
+  if (!svg || !tipEl) return;
+  svg.addEventListener('mousemove', e => {
+    const rect = svg.getBoundingClientRect();
+    const scaleX = W / rect.width;
+    const mx = (e.clientX - rect.left) * scaleX;
+    let found = null;
+    for (const it of items) {
+      if (mx >= it.x && mx <= it.x + it.w) { found = it; break; }
+    }
+    if (found) {
+      tipEl.style.display = 'block';
+      tipEl.innerHTML = formatFn(found);
+      tipEl.style.left = (e.clientX - rect.left) + 'px';
+      tipEl.style.top = Math.max(0, (e.clientY - rect.top - 55)) + 'px';
+    } else {
+      tipEl.style.display = 'none';
+    }
+  });
+  svg.addEventListener('mouseleave', () => { tipEl.style.display = 'none'; });
+}
+
 function drawBarChart(barData) {
   const svg = document.getElementById('bar-chart-svg');
   if (!svg) return;
@@ -1906,6 +1937,7 @@ function drawBarChart(barData) {
   const yS=v=>pT+(1-(v-minV)/(maxV-minV))*cH;
   const n=barData.length, barW=cW/n;
   let html='';
+  const items = [];
 
   [140,160,180,200].forEach(v=>{
     if(v<minV||v>maxV)return;
@@ -1923,6 +1955,7 @@ function drawBarChart(barData) {
     if(n<=12||(i%3===0||i===n-1)){
       html+=`<text x="${x+bw/2}" y="${H-pB+13}" font-size="8" fill="#aaa" text-anchor="middle">${d.label}</text>`;
     }
+    items.push({ x: pL+i*barW, w: barW, label: d.label, total: d.total, so: d.so });
   });
 
   // 所定ライン
@@ -1940,6 +1973,9 @@ function drawBarChart(barData) {
   });
 
   svg.innerHTML=html;
+  attachChartHover(svg, document.getElementById('bar-chart-tip'), W, H, items, it =>
+    `<strong>${it.label}</strong><br>稼働: ${it.total}H<br>所定: ${it.so}H`
+  );
 }
 
 function drawOvertimeChart(barData) {
@@ -1954,6 +1990,7 @@ function drawOvertimeChart(barData) {
   const yS = v => pT + (1 - (v - minV)/(maxV - minV)) * cH;
   const n = barData.length, barW = cW/n;
   let html = '';
+  const items = [];
 
   // ゼロライン
   html += `<line x1="${pL}" y1="${zeroY}" x2="${W-pR}" y2="${zeroY}" stroke="#ccc" stroke-width="1"/>`;
@@ -1970,9 +2007,13 @@ function drawOvertimeChart(barData) {
     if (n<=12 || (i%3===0 || i===n-1)) {
       html += `<text x="${x+bw/2}" y="${H-pB+13}" font-size="8" fill="#aaa" text-anchor="middle">${d.label}</text>`;
     }
+    items.push({ x: pL+i*barW, w: barW, label: d.label, ot });
   });
 
   svg.innerHTML = html;
+  attachChartHover(svg, document.getElementById('overtime-chart-tip'), W, H, items, it =>
+    `<strong>${it.label}</strong><br>${it.ot > 0 ? '超過' : it.ot < 0 ? '所定未満' : '所定通り'}: ${it.ot > 0 ? '+' : ''}${it.ot}H`
+  );
 }
 
 function buildInsMonthBtns(months, monthMap) {
@@ -2039,6 +2080,12 @@ function drawDailyChart(ym, records) {
   });
 
   svg.innerHTML=html;
+
+  const step = cW/(days.length-1||1);
+  const items = days.map((d,i) => ({ x: xS(i)-step/2, w: step, day: d.d, h: d.h }));
+  attachChartHover(svg, document.getElementById('daily-chart-tip'), W, H, items, it =>
+    `<strong>${it.day}日</strong><br>稼働: ${it.h}H${it.h>8?'（超過）':''}`
+  );
 
   const overDays=days.filter(d=>d.h>8).length;
   const avgH=(days.reduce((s,d)=>s+d.h,0)/days.length).toFixed(1);
