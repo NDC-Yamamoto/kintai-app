@@ -1429,6 +1429,7 @@ function openTM(k, uid) {
   document.getElementById('mt-d').value = k || dk(today.getFullYear(), today.getMonth()+1, today.getDate());
   document.getElementById('ta-proj-input').value = '';
   hideProjSuggest();
+  hideTaskSuggest();
   document.getElementById('ta-biz').innerHTML =
     '<option value="">事業区分</option>' + bizTypesCache.map(b => `<option value="${b.name}">${b.name}</option>`).join('');
   document.getElementById('ta-work').innerHTML =
@@ -1568,11 +1569,53 @@ function delTE(i) {
 }
 
 function updTS(projName) {
-  const ts = projName
+  // 案件が変わったらタスクは案件に紐づくため入力をクリアする
+  const el = document.getElementById('ta-task');
+  if (el) el.value = '';
+}
+
+function filterTaskSuggest() {
+  const projName = document.getElementById('ta-proj-input').value.trim();
+  const q = document.getElementById('ta-task').value.trim().toLowerCase();
+  const el = document.getElementById('task-suggest');
+  let candidates = projName
     ? master.tasks.filter(t => !t.proj || t.proj === projName)
     : master.tasks;
-  document.getElementById('ta-task').innerHTML =
-    '<option value="">タスク</option>' + ts.map(t => `<option value="${t.name}">${t.name}</option>`).join('');
+  if (q) candidates = candidates.filter(t => t.name.toLowerCase().includes(q));
+  const names = [...new Set(candidates.map(t => t.name))];
+  if (!names.length && !q) { el.style.display = 'none'; return; }
+  let html = names.map(n =>
+    `<div onclick="selectTask('${n.replace(/'/g,"\'")}')"
+      style="padding:6px 10px;font-size:12px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,.06)"
+      onmouseover="this.style.background='#f5f5f3'" onmouseout="this.style.background=''">${n}</div>`
+  ).join('');
+  if (q && !names.some(n => n.toLowerCase() === q)) {
+    html += `<div onclick="addTaskAndSelect('${q.replace(/'/g,"\'")}')"
+      style="padding:6px 10px;font-size:12px;cursor:pointer;color:#185fa5;background:#e6f1fb">
+      <i class="ti ti-plus" aria-hidden="true"></i> 「${q}」を新規登録して選択
+    </div>`;
+  }
+  el.innerHTML = html;
+  el.style.display = 'block';
+}
+
+function selectTask(name) {
+  document.getElementById('ta-task').value = name;
+  hideTaskSuggest();
+}
+
+function hideTaskSuggest() {
+  const el = document.getElementById('task-suggest');
+  if (el) el.style.display = 'none';
+}
+
+async function addTaskAndSelect(name) {
+  try {
+    const projName = document.getElementById('ta-proj-input').value.trim();
+    await apiAddTask(projName, name);
+    const m = await apiFetchMaster(); master = m;
+    selectTask(name);
+  } catch(e) { showError(e.message); }
 }
 
 function adjNH(d) { newH = Math.max(0.5, newH + d); document.getElementById('nh-val').textContent = newH; }
@@ -3023,7 +3066,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <div id="proj-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
     </div>
     <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
-      <select id="ta-task" style="flex:1;min-width:110px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">タスク</option></select>
+      <div style="position:relative;flex:1;min-width:110px">
+        <input type="text" id="ta-task" placeholder="タスク（入力で絞り込み）"
+          style="width:100%;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"
+          oninput="filterTaskSuggest()" onfocus="filterTaskSuggest()" onblur="setTimeout(()=>hideTaskSuggest(),200)">
+        <div id="task-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+      </div>
       <select id="ta-biz" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">事業区分</option></select>
       <select id="ta-work" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">作業区分</option></select>
     </div>
