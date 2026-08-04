@@ -627,9 +627,22 @@ function renderCalendar() {
 // ============================================================
 // 集計
 // ============================================================
+// 作業区分・事業区分の優先度を返す（数字が小さいほど優先度が高い）
+function taskPriority(entry) {
+  const workTier = { '保守':1, '導入':1, '営業':2 }[entry.work_type] || 3;
+  const bizTier  = { '直営':1, '公共':2 }[entry.biz_type] || 3;
+  return [workTier, bizTier];
+}
+
 function topTaskLabel(entries) {
   if (!entries || !entries.length) return '—';
-  const top = entries.reduce((a,b) => (b.h > a.h ? b : a));
+  const top = [...entries].sort((a,b) => {
+    const [aw, ab] = taskPriority(a);
+    const [bw, bb] = taskPriority(b);
+    if (aw !== bw) return aw - bw;
+    if (ab !== bb) return ab - bb;
+    return b.h - a.h;
+  })[0];
   const others = entries.length - 1;
   return `${top.proj} - ${top.task}（${top.h}H）${others > 0 ? ` <span style="color:var(--color-text-secondary);font-size:10px">他${others}件</span>` : ''}`;
 }
