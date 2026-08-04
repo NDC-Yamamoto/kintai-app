@@ -631,7 +631,7 @@ function topTaskLabel(entries) {
   if (!entries || !entries.length) return '—';
   const top = entries.reduce((a,b) => (b.h > a.h ? b : a));
   const others = entries.length - 1;
-  return `${top.task}（${top.h}H）${others > 0 ? ` <span style="color:var(--color-text-secondary);font-size:10px">他${others}件</span>` : ''}`;
+  return `${top.proj} - ${top.task}（${top.h}H）${others > 0 ? ` <span style="color:var(--color-text-secondary);font-size:10px">他${others}件</span>` : ''}`;
 }
 
 function renderList() {
