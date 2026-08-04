@@ -122,7 +122,7 @@ async function apiSaveKintai(userId, date, entry) {
     type: entry.type,
     start_time: entry.start || null,
     end_time: entry.end || null,
-    break_min: entry.breakMin || 60,
+    break_min: entry.breakMin != null ? entry.breakMin : 0,
     is_remote: !!entry.remote,
     loc_remote: !!entry.remote,
     loc_trip: !!entry.trip,
@@ -328,7 +328,7 @@ function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padSt
 function ld(d) { return dk(d.getFullYear(), d.getMonth()+1, d.getDate()); } // ローカル日付文字列（toISOStringのUTCズレ回避）
 function pT(t) { if(!t) return null; const [h,m]=t.split(':').map(Number); return h+m/60; }
 function fH(h) { if(!h) return '0:00'; const hh=Math.floor(h), mm=Math.round((h-hh)*60); return `${hh}:${String(mm).padStart(2,'0')}`; }
-function cW(e) { if(!e||!e.start||!e.end) return 0; return Math.max(0, pT(e.end)-pT(e.start)-(e.breakMin||60)/60); }
+function cW(e) { if(!e||!e.start||!e.end) return 0; return Math.max(0, pT(e.end)-pT(e.start)-(e.breakMin!=null?e.breakMin:0)/60); }
 function gA(id) { return accounts.find(a => a.id === id); }
 function isAdmin() { return me && me.role === 'admin'; }
 function isSub() { return me && me.role === 'sub'; }
@@ -653,7 +653,7 @@ function renderList() {
       <td>${e?`<span class="cbadge ${TB[e.type]}">${TL[e.type]}</span>`:'—'}</td>
       <td>${e&&e.start||'—'}</td><td>${e&&e.end||'—'}</td>
       <td>${e&&wh?fH(wh):'—'}</td>
-      <td>${e&&e.breakMin?e.breakMin+'分':'—'}</td>
+      <td>${e&&e.breakMin!=null?e.breakMin+'分':'—'}</td>
       <td>${e&&e.remote?'✓':'—'}</td>
       <td>${dh?dh+'H':'—'}</td>
       <td>${dh?topTaskLabel(te):'—'}</td>
@@ -1366,7 +1366,7 @@ function loadDayFields(k, uid) {
   document.getElementById('mk-type').value = e.type || 'work';
   document.getElementById('mk-s').value = e.start || '';
   document.getElementById('mk-e').value = e.end || '';
-  document.getElementById('mk-b').value = e.breakMin != null ? e.breakMin : 60;
+  document.getElementById('mk-b').value = e.breakMin != null ? e.breakMin : 0;
   document.getElementById('mk-r').checked = !!e.remote;
   document.getElementById('mk-trip').checked = !!e.trip;
   document.getElementById('mk-umeda').checked = !!e.umeda;
@@ -1401,7 +1401,8 @@ function refWorkInfo(uid, k) {
   if (k === todayK) {
     const sh = pT(e.start);
     const nowH = today.getHours() + today.getMinutes()/60;
-    const elapsed = Math.max(0, nowH - sh - (e.breakMin!=null?e.breakMin:60)/60);
+    const brk = e.breakMin!=null ? e.breakMin : 0;
+    const elapsed = Math.max(0, nowH - sh - brk/60);
     return `<i class="ti ti-clock" style="margin-right:3px"></i>参考：${e.start}〜現在（概算稼働 ${fH(elapsed)}・退社時刻は未入力）`;
   }
   return `<i class="ti ti-clock" style="margin-right:3px"></i>勤怠：${e.start}〜（退社未入力）`;
@@ -1410,6 +1411,14 @@ function refWorkInfo(uid, k) {
 // 出社/退社時刻に定時をセット
 function setStd(fieldId, val) {
   document.getElementById(fieldId).value = val;
+  calcKintaiTime();
+}
+
+// 休憩時間をワンクリックで加算（デフォルト0分から、必要な時だけ追加）
+function addBreak(mins) {
+  const el = document.getElementById('mk-b');
+  const cur = parseInt(el.value) || 0;
+  el.value = Math.min(120, cur + mins);
   calcKintaiTime();
 }
 
@@ -1655,7 +1664,8 @@ function duplicateLastEntry() {
 function calcKintaiTime() {
   const s = document.getElementById('mk-s').value;
   const e = document.getElementById('mk-e').value;
-  const b = parseInt(document.getElementById('mk-b').value) || 60;
+  const bParsed = parseInt(document.getElementById('mk-b').value);
+  const b = isNaN(bParsed) ? 0 : bParsed;
   const ph = parseFloat(document.getElementById('mk-paidhour')?.value) || 0;
   const el = document.getElementById('mk-calc');
   const sub = document.getElementById('mk-calc-sub');
@@ -3007,7 +3017,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       </div>
     </div>
   </div>
-  <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15" onchange="calcKintaiTime()"></div>
+  <div class="fr">
+    <label>休憩（分）</label>
+    <div style="display:flex;gap:6px;align-items:center">
+      <input type="number" id="mk-b" value="0" min="0" max="120" step="15" onchange="calcKintaiTime()" style="flex:1">
+      <button type="button" class="btn btn-sm" onclick="addBreak(60)" style="white-space:nowrap">＋60分</button>
+    </div>
+  </div>
   <div class="fr"><label>時間有休（h）<span style="color:#aaa;font-weight:400">※出勤時刻はそのままに、一部を時間単位で有休処理する場合</span></label><input type="number" id="mk-paidhour" value="0" min="0" max="8" step="0.5" onchange="calcKintaiTime()"></div>
   <div style="background:#f5f5f3;border-radius:8px;padding:.5rem .875rem;font-size:12px;color:#888;margin-bottom:6px">
   稼働時間：<strong id="mk-calc" style="color:#1a1a18;font-size:14px">—</strong>
