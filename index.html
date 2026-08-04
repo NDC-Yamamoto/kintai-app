@@ -1345,10 +1345,24 @@ async function delTaskM(name, proj) {
 // 勤怠モーダル
 // ============================================================
 function openKM(k, uid) {
-  uid = uid || me.id; kmUID = uid; editKKey = k;
-  const md = gK(uid); const e = k && md[k] || {};
-  document.getElementById('mk-t').textContent = k ? `${k}（${gA(uid)?.name||uid}）` : '勤怠入力';
-  document.getElementById('mk-d').value = k || dk(new Date().getFullYear(), new Date().getMonth()+1, new Date().getDate());
+  uid = uid || me.id; kmUID = uid; tmUID = uid; editKKey = k; editTKey = k; newH = 0.5;
+  const dateKey = k || dk(new Date().getFullYear(), new Date().getMonth()+1, new Date().getDate());
+  document.getElementById('mk-t').textContent = k ? `${k}（${gA(uid)?.name||uid}）` : '本日の記録';
+  document.getElementById('mk-d').value = dateKey;
+  loadDayFields(dateKey, uid);
+  document.getElementById('mk').style.display = 'flex';
+}
+
+function onDayDateChange() {
+  const k = document.getElementById('mk-d').value; if (!k) return;
+  editKKey = k; editTKey = k;
+  document.getElementById('mk-t').textContent = `${k}（${gA(kmUID)?.name||kmUID}）`;
+  loadDayFields(k, kmUID);
+}
+
+// 勤怠欄・工数欄をまとめて指定日の内容で更新する（統合モーダル用）
+function loadDayFields(k, uid) {
+  const md = gK(uid); const e = md[k] || {};
   document.getElementById('mk-type').value = e.type || 'work';
   document.getElementById('mk-s').value = e.start || '';
   document.getElementById('mk-e').value = e.end || '';
@@ -1358,49 +1372,8 @@ function openKM(k, uid) {
   document.getElementById('mk-umeda').checked = !!e.umeda;
   document.getElementById('mk-paidhour').value = e.paidHour || 0;
   calcKintaiTime();
-  document.getElementById('mk-del').style.display = (k && md[k]) ? '' : 'none';
-  document.getElementById('mk').style.display = 'flex';
-}
+  document.getElementById('mk-del').style.display = md[k] ? '' : 'none';
 
-async function saveK() {
-  const k = document.getElementById('mk-d').value; if(!k) return;
-  const entry = {
-    type: document.getElementById('mk-type').value,
-    start: document.getElementById('mk-s').value,
-    end: document.getElementById('mk-e').value,
-    breakMin: parseInt(document.getElementById('mk-b').value) || 0,
-    remote: document.getElementById('mk-r').checked,
-    trip: document.getElementById('mk-trip').checked,
-    umeda: document.getElementById('mk-umeda').checked,
-    paidHour: parseFloat(document.getElementById('mk-paidhour').value) || 0
-  };
-  showLoading('保存中...');
-  try {
-    await apiSaveKintai(kmUID, k, entry);
-    if (!kintaiCache[kmUID]) kintaiCache[kmUID] = {};
-    kintaiCache[kmUID][k] = entry;
-    hideLoading(); hm('mk'); renderCalendar();
-    if (document.getElementById('sec-list').classList.contains('active')) renderList();
-  } catch(e) { hideLoading(); showError(e.message); }
-}
-
-async function delK() {
-  showLoading('削除中...');
-  try {
-    await apiDeleteKintai(kmUID, editKKey);
-    delete kintaiCache[kmUID][editKKey];
-    hideLoading(); hm('mk'); renderCalendar();
-  } catch(e) { hideLoading(); showError(e.message); }
-}
-
-// ============================================================
-// 工数モーダル
-// ============================================================
-function openTM(k, uid) {
-  uid = uid || me.id; tmUID = uid; editTKey = k; newH = 0.5;
-  const today = new Date();
-  document.getElementById('mt-t').textContent = k ? `${k}（${gA(uid)?.name||uid}）工数` : '工数入力';
-  document.getElementById('mt-d').value = k || dk(today.getFullYear(), today.getMonth()+1, today.getDate());
   document.getElementById('ta-proj-input').value = '';
   hideProjSuggest();
   hideTaskSuggest();
@@ -1413,7 +1386,67 @@ function openTM(k, uid) {
   renderTplBtns();
   document.getElementById('nh-val').textContent = newH;
   document.getElementById('tpl-save-name').value = '';
-  document.getElementById('mt').style.display = 'flex';
+  document.getElementById('mt-kintai-info').innerHTML = refWorkInfo(uid, k);
+}
+
+// 工数入力時の参考表示：出社時刻から現在（または退社時刻）までの概算稼働時間
+function refWorkInfo(uid, k) {
+  const md = gK(uid); const e = md[k];
+  if (!e || !e.start) return '';
+  const today = new Date();
+  const todayK = dk(today.getFullYear(), today.getMonth()+1, today.getDate());
+  if (e.end) {
+    return `<i class="ti ti-clock" style="margin-right:3px"></i>勤怠：${e.start}〜${e.end}（稼働 ${fH(cW(e))}）`;
+  }
+  if (k === todayK) {
+    const sh = pT(e.start);
+    const nowH = today.getHours() + today.getMinutes()/60;
+    const elapsed = Math.max(0, nowH - sh - (e.breakMin!=null?e.breakMin:60)/60);
+    return `<i class="ti ti-clock" style="margin-right:3px"></i>参考：${e.start}〜現在（概算稼働 ${fH(elapsed)}・退社時刻は未入力）`;
+  }
+  return `<i class="ti ti-clock" style="margin-right:3px"></i>勤怠：${e.start}〜（退社未入力）`;
+}
+
+// 出社/退社時刻に定時をセット
+function setStd(fieldId, val) {
+  document.getElementById(fieldId).value = val;
+  calcKintaiTime();
+}
+
+async function saveDay() {
+  const k = document.getElementById('mk-d').value; if(!k) return;
+  const entry = {
+    type: document.getElementById('mk-type').value,
+    start: document.getElementById('mk-s').value,
+    end: document.getElementById('mk-e').value,
+    breakMin: parseInt(document.getElementById('mk-b').value) || 0,
+    remote: document.getElementById('mk-r').checked,
+    trip: document.getElementById('mk-trip').checked,
+    umeda: document.getElementById('mk-umeda').checked,
+    paidHour: parseFloat(document.getElementById('mk-paidhour').value) || 0
+  };
+  const entries = gT(tmUID)[k] || [];
+  showLoading('保存中...');
+  try {
+    await apiSaveKintai(kmUID, k, entry);
+    if (!kintaiCache[kmUID]) kintaiCache[kmUID] = {};
+    kintaiCache[kmUID][k] = entry;
+    await apiSaveTaskEntries(tmUID, k, entries);
+    hideLoading(); hm('mk'); renderCalendar();
+    if (document.getElementById('sec-list').classList.contains('active')) renderList();
+    if (document.getElementById('sec-workload').classList.contains('active')) renderWorkload();
+  } catch(e) { hideLoading(); showError(e.message); }
+}
+
+async function delK() {
+  showLoading('削除中...');
+  try {
+    await apiDeleteKintai(kmUID, editKKey);
+    delete kintaiCache[kmUID][editKKey];
+    document.getElementById('mk-del').style.display = 'none';
+    hideLoading(); renderCalendar();
+    loadDayFields(editKKey, kmUID);
+  } catch(e) { hideLoading(); showError(e.message); }
 }
 
 function renderTplBtns() {
@@ -1509,7 +1542,7 @@ async function addProjAndSelect(name) {
 }
 
 function renderTEL(k) {
-  const k2 = k || document.getElementById('mt-d').value;
+  const k2 = k || document.getElementById('mk-d').value;
   const te = gT(tmUID)[k2] || [];
   const tot = te.reduce((s,t) => s+t.h, 0);
   let h = te.map((t,i) =>
@@ -1528,14 +1561,14 @@ function renderTEL(k) {
 }
 
 function adjTE(i, d) {
-  const k = document.getElementById('mt-d').value;
+  const k = document.getElementById('mk-d').value;
   if (!gT(tmUID)[k]) return;
   gT(tmUID)[k][i].h = Math.max(0.5, gT(tmUID)[k][i].h + d);
   renderTEL(k);
 }
 
 function delTE(i) {
-  const k = document.getElementById('mt-d').value;
+  const k = document.getElementById('mk-d').value;
   if (gT(tmUID)[k]) gT(tmUID)[k].splice(i, 1);
   renderTEL(k);
 }
@@ -1597,7 +1630,7 @@ function addTE() {
   const biz  = document.getElementById('ta-biz').value;
   const work = document.getElementById('ta-work').value;
   if (!proj || !task) { showError('案件とタスクを入力してください'); return; }
-  const k = document.getElementById('mt-d').value; if (!k) return;
+  const k = document.getElementById('mk-d').value; if (!k) return;
   if (!gT(tmUID)[k]) gT(tmUID)[k] = [];
   const ex = gT(tmUID)[k].find(t => t.proj===proj && t.task===task && t.biz_type===biz && t.work_type===work);
   if (ex) ex.h += newH;
@@ -1606,7 +1639,7 @@ function addTE() {
 }
 
 function duplicateLastEntry() {
-  const k = document.getElementById('mt-d').value;
+  const k = document.getElementById('mk-d').value;
   const entries = gT(tmUID)[k] || [];
   if (!entries.length) { showError('複製するエントリーがありません'); return; }
   const last = entries[entries.length - 1];
@@ -1617,17 +1650,6 @@ function duplicateLastEntry() {
     if (last.biz_type) document.getElementById('ta-biz').value = last.biz_type;
     if (last.work_type) document.getElementById('ta-work').value = last.work_type;
   }, 50);
-}
-
-async function saveT() {
-  const k = document.getElementById('mt-d').value; if (!k) return;
-  const entries = gT(tmUID)[k] || [];
-  showLoading('保存中...');
-  try {
-    await apiSaveTaskEntries(tmUID, k, entries);
-    hideLoading(); hm('mt'); renderCalendar();
-    if (document.getElementById('sec-workload').classList.contains('active')) renderWorkload();
-  } catch(e) { hideLoading(); showError(e.message); }
 }
 
 function calcKintaiTime() {
@@ -2717,8 +2739,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <button onclick="cm(1)"><i class="ti ti-chevron-right"></i></button>
       <select class="vsel" id="cal-vsel" onchange="switchViewMember('cal-vsel')" style="display:none"></select>
       <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
-      <button class="btn btn-sm" onclick="openKM(null)"><i class="ti ti-plus"></i> 勤怠</button>
-      <button class="btn btn-sm" onclick="openTM(null)"><i class="ti ti-plus"></i> 工数</button>
+      <button class="btn btn-sm" onclick="openKM(null)"><i class="ti ti-plus"></i> 記録を追加</button>
     </div>
     <table class="calendar"><thead><tr><th style="color:#E24B4A">日</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th><th style="color:#378ADD">土</th></tr></thead><tbody id="cal-body"></tbody></table>
   </div>
@@ -2967,13 +2988,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 </div>
 </div>
 
-<!-- Kintai Modal -->
+<!-- Day Edit Modal (勤怠＋工数 統合) -->
 <div id="mk" class="mo" style="display:none" onclick="if(event.target===this)hm('mk')">
-<div class="mc" onclick="event.stopPropagation()">
-  <h3 id="mk-t">勤怠入力</h3>
-  <div class="fr"><label>日付</label><input type="date" id="mk-d"></div>
-  <div class="fr"><label>区分</label><select id="mk-type"><option value="work">出勤</option><option value="paid">有給</option><option value="half">半休</option><option value="holiday">祝日</option><option value="remote">在宅</option></select></div>
-  <div class="fr"><label>出社 / 退社</label><div class="tr2"><input type="time" id="mk-s" onchange="calcKintaiTime()"><input type="time" id="mk-e" onchange="calcKintaiTime()"></div></div>
+<div class="mc" onclick="event.stopPropagation()" style="max-width:540px">
+  <h3 id="mk-t">本日の記録</h3>
+  <div class="fr"><label>日付</label><input type="date" id="mk-d" onchange="onDayDateChange()"></div>
+  <div class="fr"><label>区分</label><select id="mk-type" onchange="calcKintaiTime()"><option value="work">出勤</option><option value="paid">有給</option><option value="half">半休</option><option value="holiday">祝日</option><option value="remote">在宅</option></select></div>
+  <div class="fr">
+    <label>出社 / 退社</label>
+    <div class="tr2">
+      <div style="flex:1;display:flex;gap:4px;align-items:center">
+        <input type="time" id="mk-s" onchange="calcKintaiTime()" style="flex:1">
+        <button type="button" class="btn btn-sm" onclick="setStd('mk-s','09:00')" style="white-space:nowrap">定時</button>
+      </div>
+      <div style="flex:1;display:flex;gap:4px;align-items:center">
+        <input type="time" id="mk-e" onchange="calcKintaiTime()" style="flex:1">
+        <button type="button" class="btn btn-sm" onclick="setStd('mk-e','18:00')" style="white-space:nowrap">定時</button>
+      </div>
+    </div>
+  </div>
   <div class="fr"><label>休憩（分）</label><input type="number" id="mk-b" value="60" min="0" max="120" step="15" onchange="calcKintaiTime()"></div>
   <div class="fr"><label>時間有休（h）<span style="color:#aaa;font-weight:400">※出勤時刻はそのままに、一部を時間単位で有休処理する場合</span></label><input type="number" id="mk-paidhour" value="0" min="0" max="8" step="0.5" onchange="calcKintaiTime()"></div>
   <div style="background:#f5f5f3;border-radius:8px;padding:.5rem .875rem;font-size:12px;color:#888;margin-bottom:6px">
@@ -2988,59 +3021,56 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-umeda" style="width:auto"> 梅田支店</label>
   </div>
 </div>
-  <div class="mbtns">
-    <button class="btn btn-d" id="mk-del" onclick="delK()" style="display:none;margin-right:auto">削除</button>
-    <button class="btn" onclick="hm('mk')">キャンセル</button>
-    <button class="btn btn-p" onclick="saveK()">保存</button>
-  </div>
-</div></div>
 
-<!-- Task Modal -->
-<div id="mt" class="mo" style="display:none" onclick="if(event.target===this)hm('mt')">
-<div class="mc" onclick="event.stopPropagation()" style="max-width:520px">
-  <h3 id="mt-t">工数入力</h3>
-  <div class="fr"><label>日付</label><input type="date" id="mt-d"></div>
-  <div style="margin-bottom:8px">
-    <div style="font-size:11px;color:#888;margin-bottom:4px">テンプレート</div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center" id="tpl-btn-list">
-      <span style="font-size:11px;color:#aaa">読み込み中...</span>
-    </div>
-  </div>
-  <div class="tel" id="tel"></div>
-  <div style="background:#f5f5f3;border-radius:8px;padding:.75rem;margin-bottom:8px">
-    <div style="font-size:11px;color:#888;margin-bottom:6px">エントリー追加</div>
-    <div style="position:relative;margin-bottom:6px">
-      <input type="text" id="ta-proj-input" placeholder="案件名（入力で絞り込み）"
-        style="width:100%;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:5px 8px"
-        oninput="filterProjSuggest()" onfocus="filterProjSuggest()" onblur="setTimeout(()=>hideProjSuggest(),200)">
-      <div id="proj-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
-    </div>
-    <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
-      <div style="position:relative;flex:1;min-width:110px">
-        <input type="text" id="ta-task" placeholder="タスク（入力で絞り込み）"
-          style="width:100%;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"
-          oninput="filterTaskSuggest()" onfocus="filterTaskSuggest()" onblur="setTimeout(()=>hideTaskSuggest(),200)">
-        <div id="task-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+  <div style="border-top:0.5px solid rgba(0,0,0,.1);margin:.875rem 0;padding-top:.875rem">
+    <div style="font-size:12px;font-weight:500;color:#888;margin-bottom:6px">工数</div>
+    <div id="mt-kintai-info" style="font-size:11px;color:#888;margin-bottom:8px"></div>
+    <div style="margin-bottom:8px">
+      <div style="font-size:11px;color:#888;margin-bottom:4px">テンプレート</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center" id="tpl-btn-list">
+        <span style="font-size:11px;color:#aaa">読み込み中...</span>
       </div>
-      <select id="ta-biz" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">事業区分</option></select>
-      <select id="ta-work" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">作業区分</option></select>
     </div>
-    <div style="display:flex;gap:5px;align-items:center">
-      <div class="hs" style="flex-shrink:0"><button onclick="adjNH(-0.5)">−</button><span id="nh-val">0.5</span><button onclick="adjNH(0.5)">＋</button></div>
-      <span style="font-size:11px;color:#888">H</span>
-      <button class="btn btn-sm" onclick="addTE()" style="margin-left:auto"><i class="ti ti-plus"></i> 追加</button>
+    <div class="tel" id="tel"></div>
+    <div style="background:#f5f5f3;border-radius:8px;padding:.75rem;margin-bottom:8px">
+      <div style="font-size:11px;color:#888;margin-bottom:6px">エントリー追加</div>
+      <div style="position:relative;margin-bottom:6px">
+        <input type="text" id="ta-proj-input" placeholder="案件名（入力で絞り込み）"
+          style="width:100%;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:5px 8px"
+          oninput="filterProjSuggest()" onfocus="filterProjSuggest()" onblur="setTimeout(()=>hideProjSuggest(),200)">
+        <div id="proj-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+      </div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:6px">
+        <div style="position:relative;flex:1;min-width:110px">
+          <input type="text" id="ta-task" placeholder="タスク（入力で絞り込み）"
+            style="width:100%;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"
+            oninput="filterTaskSuggest()" onfocus="filterTaskSuggest()" onblur="setTimeout(()=>hideTaskSuggest(),200)">
+          <div id="task-suggest" style="display:none;position:absolute;top:100%;left:0;right:0;background:#fff;border:0.5px solid rgba(0,0,0,.15);border-radius:6px;max-height:160px;overflow-y:auto;z-index:200;box-shadow:0 4px 12px rgba(0,0,0,.1)"></div>
+        </div>
+        <select id="ta-biz" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">事業区分</option></select>
+        <select id="ta-work" style="flex:1;min-width:90px;font-size:12px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 6px"><option value="">作業区分</option></select>
+      </div>
+      <div style="display:flex;gap:5px;align-items:center">
+        <div class="hs" style="flex-shrink:0"><button onclick="adjNH(-0.5)">−</button><span id="nh-val">0.5</span><button onclick="adjNH(0.5)">＋</button></div>
+        <span style="font-size:11px;color:#888">H</span>
+        <button class="btn btn-sm" onclick="addTE()" style="margin-left:auto"><i class="ti ti-plus"></i> 追加</button>
+      </div>
+      <div style="margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.08);display:flex;gap:5px;align-items:center">
+        <input type="text" id="tpl-save-name" placeholder="テンプレ名（案件名省略可）"
+          style="flex:1;font-size:11px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px">
+        <button class="btn btn-sm" onclick="saveCurrentAsTemplate()" style="font-size:10px;white-space:nowrap">
+          <i class="ti ti-bookmark"></i> 保存
+        </button>
+      </div>
     </div>
-    <div style="margin-top:8px;padding-top:8px;border-top:0.5px solid rgba(0,0,0,.08);display:flex;gap:5px;align-items:center">
-      <input type="text" id="tpl-save-name" placeholder="テンプレ名（案件名省略可）"
-        style="flex:1;font-size:11px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:4px 8px">
-      <button class="btn btn-sm" onclick="saveCurrentAsTemplate()" style="font-size:10px;white-space:nowrap">
-        <i class="ti ti-bookmark"></i> 保存
-      </button>
-    </div>
+    <div style="font-size:11px;color:#888">合計: <strong id="mt-tot">0</strong> H &nbsp;／&nbsp; 直前を複製: <button class="btn btn-sm" onclick="duplicateLastEntry()" style="font-size:10px;padding:2px 8px"><i class="ti ti-copy"></i></button></div>
   </div>
-  <div id="mt-kintai-info" style="font-size:11px;color:#888;margin-bottom:4px"></div>
-  <div style="font-size:11px;color:#888">合計: <strong id="mt-tot">0</strong> H &nbsp;／&nbsp; 直前を複製: <button class="btn btn-sm" onclick="duplicateLastEntry()" style="font-size:10px;padding:2px 8px"><i class="ti ti-copy"></i></button></div>
-  <div class="mbtns"><button class="btn" onclick="hm('mt')">キャンセル</button><button class="btn btn-p" onclick="saveT()">保存</button></div>
+
+  <div class="mbtns">
+    <button class="btn btn-d" id="mk-del" onclick="delK()" style="display:none;margin-right:auto">勤怠のみ削除</button>
+    <button class="btn" onclick="hm('mk')">キャンセル</button>
+    <button class="btn btn-p" onclick="saveDay()">保存</button>
+  </div>
 </div></div>
 
 
