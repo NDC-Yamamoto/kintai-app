@@ -2317,6 +2317,23 @@ function balToggleMember(btn) {
   renderBalance();
 }
 
+function balToggleWork(btn) {
+  btn.classList.toggle('on');
+  renderBalance();
+}
+
+function balWorkPreset(preset) {
+  document.querySelectorAll('.bal-work-btn').forEach(b => {
+    if (preset === 'all') { b.classList.add('on'); return; }
+    if (preset === 'impl_maint') {
+      const w = b.dataset.work;
+      if (w === '導入' || w === '保守') b.classList.add('on');
+      else b.classList.remove('on');
+    }
+  });
+  renderBalance();
+}
+
 function balUpdateProjSel() {
   const sel = document.getElementById('bal-proj-sel');
   const statusSel = document.getElementById('bal-status-sel')?.value || 'all';
@@ -2347,6 +2364,7 @@ function balFilterData() {
   const proj = document.getElementById('bal-proj-sel').value;
   const statusSel = document.getElementById('bal-status-sel')?.value || 'all';
   const selectedMembers = [...document.querySelectorAll('.bal-member-btn.on')].map(b => b.dataset.uid);
+  const selectedWorks = [...document.querySelectorAll('.bal-work-btn.on')].map(b => b.dataset.work);
   const raw = master.projectsRaw || [];
   const statusMap = {};
   raw.forEach(p => { statusMap[p.name] = p.status || '保守中'; });
@@ -2358,6 +2376,7 @@ function balFilterData() {
     if (statusSel !== 'all' && statusMap[d.proj] !== statusSel) return false;
     if (statusMap[d.proj] === '失注') return false;
     if (selectedMembers.length && !selectedMembers.includes(d.userId)) return false;
+    if (selectedWorks.length && !selectedWorks.includes(d.work||'その他')) return false;
     return true;
   });
 }
@@ -2376,6 +2395,9 @@ async function renderBalance() {
   const isSingle = proj !== 'all';
 
   const WORK_COLOR = {'導入':'#e24b4a','保守':'#378add','営業':'#f0a500','その他':'#888780'};
+  const WORK_BG    = {'導入':'#faeeda','保守':'#e6f1fb','営業':'#fcebeb','その他':'#f1efe8'};
+  const WORK_TEXT_M= {'導入':'#854f0b','保守':'#0c447c','営業':'#a32d2d','その他':'#888780'};
+  const WORK_ORDER = {'導入':0,'保守':1,'営業':2,'その他':3};
   const BIZ_COLOR  = {'直営':'#7f77dd','公共':'#5dcaa5','その他':'#d3d1c7'};
   const BIZ_BG     = {'直営':'#eeedfe','公共':'#eaf3de','その他':'#f1efe8'};
   const BIZ_TEXT   = {'直営':'#3c3489','公共':'#3b6d11','その他':'#888780'};
@@ -2395,8 +2417,9 @@ async function renderBalance() {
   data.forEach(d => {
     workMap[d.work] = (workMap[d.work]||0) + d.h;
     bizMap[d.biz]   = (bizMap[d.biz]||0) + d.h;
-    if (!projMap[d.proj]) projMap[d.proj] = {h:0, biz:d.biz};
+    if (!projMap[d.proj]) projMap[d.proj] = {h:0, biz:d.biz, works:{}};
     projMap[d.proj].h += d.h;
+    projMap[d.proj].works[d.work] = (projMap[d.proj].works[d.work]||0) + d.h;
     if (!memberMap[d.userId]) memberMap[d.userId] = {h:0, name:d.userName};
     memberMap[d.userId].h += d.h;
   });
@@ -2564,14 +2587,32 @@ async function renderBalance() {
     }</div>`;
   } else {
     document.getElementById('bal-rank-title').textContent = '案件別ランキング';
-    const sorted = Object.entries(projMap).sort((a,b)=>b[1].h-a[1].h).slice(0,15);
+    const sortMode = document.getElementById('bal-rank-sort')?.value || 'hours';
+
+    let sorted = Object.entries(projMap).map(([p,v]) => {
+      const topWork = Object.entries(v.works).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'その他';
+      return [p, {...v, topWork}];
+    });
+
+    if (sortMode === 'work') {
+      sorted.sort((a,b) => {
+        const wo = (WORK_ORDER[a[1].topWork]??9) - (WORK_ORDER[b[1].topWork]??9);
+        if (wo !== 0) return wo;
+        return b[1].h - a[1].h;
+      });
+    } else {
+      sorted.sort((a,b)=>b[1].h-a[1].h);
+    }
+    sorted = sorted.slice(0,15);
+
     if (!sorted.length) { document.getElementById('bal-rank-content').innerHTML='<div style="color:#aaa;font-size:12px;padding:1rem">データなし</div>'; return; }
-    const maxH = sorted[0][1].h;
+    const maxH = Math.max(...sorted.map(([,v])=>v.h));
     document.getElementById('bal-rank-content').innerHTML = `<div style="border:0.5px solid rgba(0,0,0,.1);border-radius:8px;overflow:hidden">${
-      sorted.map(([proj,{h,biz}],i) => `
+      sorted.map(([proj,{h,biz,topWork}],i) => `
         <div style="display:flex;align-items:center;gap:8px;padding:.5rem .875rem;font-size:12px;${i>0?'border-top:0.5px solid rgba(0,0,0,.06)':''}">
           <span style="min-width:18px;color:#aaa;font-size:11px">${i+1}</span>
           <span style="min-width:80px;font-weight:500">${proj}</span>
+          <span style="font-size:9px;padding:1px 5px;border-radius:10px;background:${WORK_BG[topWork]||'#f1efe8'};color:${WORK_TEXT_M[topWork]||'#888'};flex-shrink:0">${topWork}</span>
           <span style="font-size:9px;padding:1px 5px;border-radius:10px;background:${BIZ_BG[biz]||'#f1efe8'};color:${BIZ_TEXT[biz]||'#888'};flex-shrink:0">${biz}</span>
           <div style="flex:1;background:#f0f0ee;border-radius:3px;height:6px;overflow:hidden">
             <div style="width:${Math.round(h/maxH*100)}%;height:100%;border-radius:3px;background:${BIZ_COLOR[biz]||'#888'}"></div>
@@ -2705,6 +2746,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 .wl-sub-tab:hover:not(.on){color:#1a1a18}
 .bal-member-btn{padding:3px 10px;font-size:11px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
 .bal-member-btn.on{background:#378add;color:#fff;border-color:#378add}
+.bal-work-btn{padding:3px 10px;font-size:11px;border-radius:20px;border:0.5px solid rgba(0,0,0,.2);background:#fff;color:#888;cursor:pointer}
+.bal-work-btn.on{background:#e24b4a;color:#fff;border-color:#e24b4a}
 .bal-tooltip{position:absolute;background:#1a1a18;color:#fff;font-size:11px;padding:5px 9px;border-radius:6px;pointer-events:none;white-space:nowrap;display:none;z-index:10;transform:translateX(-50%)}
 .bal-tooltip::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);border:5px solid transparent;border-top-color:#1a1a18}
 .bal-chart-wrap{position:relative}
@@ -2855,6 +2898,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
           <button class="bal-grp-btn" data-grp="その他" onclick="balSetGrp('その他',this)">その他</button>
         </div>
       </div>
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" id="bal-work-row">
+        <span style="font-size:11px;color:#888;white-space:nowrap">作業区分</span>
+        <div style="display:flex;gap:4px;flex-wrap:wrap" id="bal-work-btns">
+          <button class="bal-work-btn on" data-work="導入" onclick="balToggleWork(this)">導入</button>
+          <button class="bal-work-btn on" data-work="保守" onclick="balToggleWork(this)">保守</button>
+          <button class="bal-work-btn on" data-work="営業" onclick="balToggleWork(this)">営業</button>
+          <button class="bal-work-btn on" data-work="その他" onclick="balToggleWork(this)">その他</button>
+        </div>
+        <button class="btn btn-sm" onclick="balWorkPreset('impl_maint')" style="font-size:11px">導入・保守のみ</button>
+        <button class="btn btn-sm" onclick="balWorkPreset('all')" style="font-size:11px">全て表示</button>
+      </div>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px" id="bal-member-row">
         <span style="font-size:11px;color:#888;white-space:nowrap">メンバー</span>
         <div style="display:flex;gap:4px;flex-wrap:wrap" id="bal-member-btns"></div>
@@ -2922,7 +2976,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
     </div>
 
     <!-- 案件別 or メンバー別 -->
-    <div style="font-size:12px;font-weight:500;color:#888;margin-bottom:.5rem" id="bal-rank-title">案件別ランキング</div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.5rem">
+      <div style="font-size:12px;font-weight:500;color:#888" id="bal-rank-title">案件別ランキング</div>
+      <select id="bal-rank-sort" style="font-size:11px;border:0.5px solid rgba(0,0,0,.2);border-radius:6px;padding:3px 6px;background:#fff" onchange="renderBalance()">
+        <option value="hours">工数順</option>
+        <option value="work">作業区分順（導入→保守→営業→その他）</option>
+      </select>
+    </div>
     <div id="bal-rank-content"></div>
   </div>
 
