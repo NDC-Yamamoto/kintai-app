@@ -324,6 +324,24 @@ const DAY = ['日','月','火','水','木','金','土'];
 const TL = { work:'出勤', paid:'有給', half:'半休', holiday:'祝日', remote:'在宅' };
 const TB = { work:'bw', paid:'bp', half:'bh', holiday:'bho', remote:'br' };
 
+// 稼働時間の粒度に応じた記号（◎:8H以上／〇:4H以上8H未満／△:1H以上4H未満）
+const GRADE_BG   = { '◎':'#e3f3e6', '〇':'#e7f0fb', '△':'#fbeedd' };
+const GRADE_TEXT = { '◎':'#1f7a3d', '〇':'#185fa5', '△':'#a3650b' };
+function gradeMark(h) {
+  if (!h) return null;
+  if (h >= 8) return '◎';
+  if (h >= 4) return '〇';
+  if (h >= 1) return '△';
+  return null;
+}
+function gradeBadge(mark) {
+  if (!mark) return '—';
+  return `<span style="display:inline-block;min-width:18px;text-align:center;font-size:13px;font-weight:600;padding:0 4px;border-radius:8px;background:${GRADE_BG[mark]};color:${GRADE_TEXT[mark]}">${mark}</span>`;
+}
+function gradeCountsLabel(counts) {
+  return ['◎','〇','△'].map(m => `${gradeBadge(m)}<span style="font-size:11px;color:var(--color-text-secondary);margin:0 6px 0 2px">${counts[m]}</span>`).join('');
+}
+
 function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
 function ld(d) { return dk(d.getFullYear(), d.getMonth()+1, d.getDate()); } // ローカル日付文字列（toISOStringのUTCズレ回避）
 function pT(t) { if(!t) return null; const [h,m]=t.split(':').map(Number); return h+m/60; }
@@ -653,6 +671,7 @@ function renderList() {
   const dim=new Date(curY,curM,0).getDate();
   const md=gK(uid), mt=gT(uid);
   let wd=0, th=0, pd=0, tkh=0; let rows='';
+  const remCounts={'◎':0,'〇':0,'△':0}, tripCounts={'◎':0,'〇':0,'△':0};
   for(let d=1;d<=dim;d++) {
     const k=dk(curY,curM,d); const e=md[k]; const te=mt[k]||[];
     const dh=te.reduce((s,t)=>s+t.h,0); if(dh) tkh+=dh;
@@ -661,23 +680,30 @@ function renderList() {
     if(e&&(e.type==='work'||e.type==='remote')) { wd++; th+=wh; }
     if(e&&e.type==='paid') pd++;
     if(e&&e.type==='half') pd+=0.5;
+    const remMark = e&&e.remote ? gradeMark(wh) : null;
+    const tripMark = e&&e.trip ? gradeMark(wh) : null;
+    if (remMark) remCounts[remMark]++;
+    if (tripMark) tripCounts[tripMark]++;
     rows += `<tr ${canEdit(uid)?`onclick="openKM('${k}','${uid}')" style="cursor:pointer"`:''}>
       <td>${curM}/${d}(${DAY[w]})</td>
       <td>${e?`<span class="cbadge ${TB[e.type]}">${TL[e.type]}</span>`:'—'}</td>
       <td>${e&&e.start||'—'}</td><td>${e&&e.end||'—'}</td>
       <td>${e&&wh?fH(wh):'—'}</td>
       <td>${e&&e.breakMin!=null?e.breakMin+'分':'—'}</td>
-      <td>${e&&e.remote?'✓':'—'}</td>
+      <td>${gradeBadge(remMark)}</td>
+      <td>${gradeBadge(tripMark)}</td>
       <td>${dh?dh+'H':'—'}</td>
       <td>${dh?topTaskLabel(te):'—'}</td>
     </tr>`;
   }
-  document.getElementById('list-body').innerHTML = rows || '<tr><td colspan="9" style="text-align:center;color:var(--color-text-secondary);padding:1.5rem">記録なし</td></tr>';
+  document.getElementById('list-body').innerHTML = rows || '<tr><td colspan="10" style="text-align:center;color:var(--color-text-secondary);padding:1.5rem">記録なし</td></tr>';
   document.getElementById('stats-grid').innerHTML = `
     <div class="dcard"><div class="dcard-label">稼働日数</div><div class="dcard-val">${wd}<span class="dcard-unit">日</span></div></div>
     <div class="dcard"><div class="dcard-label">総稼働時間</div><div class="dcard-val" style="font-size:18px">${fH(th)}</div></div>
     <div class="dcard"><div class="dcard-label">有給取得</div><div class="dcard-val">${pd}<span class="dcard-unit">日</span></div></div>
-    <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${tkh}<span class="dcard-unit">H</span></div></div>`;
+    <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${tkh}<span class="dcard-unit">H</span></div></div>
+    <div class="dcard"><div class="dcard-label">在宅（◎8H+／〇4H+／△1H+）</div><div class="dcard-val" style="font-size:14px;display:flex;align-items:center">${gradeCountsLabel(remCounts)}</div></div>
+    <div class="dcard"><div class="dcard-label">出張（◎8H+／〇4H+／△1H+）</div><div class="dcard-val" style="font-size:14px;display:flex;align-items:center">${gradeCountsLabel(tripCounts)}</div></div>`;
 }
 
 // ============================================================
@@ -2820,7 +2846,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
     </div>
     <div class="stats-grid" id="stats-grid"></div>
-    <table class="dt"><thead><tr><th>日付</th><th>区分</th><th>出社</th><th>退社</th><th>稼働</th><th>休憩</th><th>在宅</th><th>工数</th><th>主なタスク</th></tr></thead><tbody id="list-body"></tbody></table>
+    <table class="dt"><thead><tr><th>日付</th><th>区分</th><th>出社</th><th>退社</th><th>稼働</th><th>休憩</th><th>在宅</th><th>出張</th><th>工数</th><th>主なタスク</th></tr></thead><tbody id="list-body"></tbody></table>
   </div>
 
   <!-- Workload -->
