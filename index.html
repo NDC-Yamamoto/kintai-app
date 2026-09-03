@@ -110,7 +110,8 @@ async function apiFetchKintai(userId, year, month) {
       trip: r.loc_trip,
       umeda: r.loc_umeda,
       paidHour: r.paid_hour ? parseFloat(r.paid_hour) : 0,
-      remoteHour: r.remote_hour ? parseFloat(r.remote_hour) : 0
+      remoteHour: r.remote_hour ? parseFloat(r.remote_hour) : 0,
+      remoteHourAuto: r.remote_hour_auto !== false
     };
   });
   return map;
@@ -129,7 +130,8 @@ async function apiSaveKintai(userId, date, entry) {
     loc_trip: !!entry.trip,
     loc_umeda: !!entry.umeda,
     paid_hour: entry.paidHour || 0,
-    remote_hour: entry.remoteHour || 0
+    remote_hour: entry.remoteHour || 0,
+    remote_hour_auto: entry.remoteHourAuto !== false
   };
   const { error } = await sb.from('kintai_records').upsert(record, { onConflict: 'user_id,date' });
   if (error) throw error;
@@ -318,6 +320,7 @@ let editKKey = null, kmUID = null;
 let editTKey = null, tmUID = null;
 let editAcctId = null;
 let newH = 0.5;
+let rhAutoMode = true; // 在宅稼働時間を自動計算するか（false=手動で上書き済み）
 
 // ============================================================
 // ヘルパー
@@ -342,6 +345,22 @@ function gradeBadge(mark) {
 }
 function gradeCountsLabel(counts) {
   return ['◎','〇','△'].map(m => `${gradeBadge(m)}<span style="font-size:11px;color:var(--color-text-secondary);margin:0 6px 0 2px">${counts[m]}</span>`).join('');
+}
+// 「在宅」列：チェック済みだが在宅稼働時間が未入力の日を検知して要注意バッジで表示
+function remoteMissingBadge() {
+  return `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#fdeaea;color:#c0392b" title="在宅稼働時間が未入力です">未入力</span>`;
+}
+function remoteCellInfo(e) {
+  if (!e || !e.remote) return { key:null, html:'—' };
+  const mark = gradeMark(e.remoteHour || 0);
+  if (mark) return { key: mark, html: gradeBadge(mark) };
+  return { key: '未入力', html: remoteMissingBadge() };
+}
+function remoteCountsLabel(counts) {
+  const base = gradeCountsLabel(counts);
+  const missing = counts['未入力'] || 0;
+  if (!missing) return base;
+  return base + `<span style="margin-left:6px">${remoteMissingBadge()}<span style="font-size:11px;color:#c0392b;font-weight:600;margin:0 2px 0 2px">${missing}</span></span>`;
 }
 
 function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
@@ -672,8 +691,8 @@ function renderList() {
   document.getElementById('mt2').textContent = `${curY}年${curM}月`;
   const dim=new Date(curY,curM,0).getDate();
   const md=gK(uid), mt=gT(uid);
-  let wd=0, th=0, pd=0, tkh=0, tripDays=0; let rows='';
-  const remCounts={'◎':0,'〇':0,'△':0};
+  let wd=0, th=0, pd=0, tkh=0, tripDays=0, tripMissing=0; let rows='';
+  const remCounts={'◎':0,'〇':0,'△':0,'未入力':0};
   for(let d=1;d<=dim;d++) {
     const k=dk(curY,curM,d); const e=md[k]; const te=mt[k]||[];
     const dh=te.reduce((s,t)=>s+t.h,0); if(dh) tkh+=dh;
@@ -682,20 +701,26 @@ function renderList() {
     if(e&&(e.type==='work'||e.type==='remote')) { wd++; th+=wh; }
     if(e&&e.type==='paid') pd++;
     if(e&&e.type==='half') pd+=0.5;
-    // 在宅：手入力の在宅稼働時間（remoteHour）で◎〇△を判定
-    const remMark = e&&e.remote ? gradeMark(e.remoteHour||0) : null;
-    if (remMark) remCounts[remMark]++;
-    // 出張：時間の粒度は不要、有無（回数）のみ集計
+    // 在宅：手入力の在宅稼働時間（remoteHour）で◎〇△を判定。チェック済みなのに未入力（0）の日は要確認として警告表示
+    const remInfo = remoteCellInfo(e);
+    if (remInfo.key) remCounts[remInfo.key]++;
+    const remRowFlag = remInfo.key === '未入力';
+    // 出張：時間の粒度は不要、有無（回数）のみ集計。ただし出社/退社が未入力＝稼働時間0の日は要確認として警告表示
     const tripOn = !!(e&&e.trip);
+    const tripNoTime = tripOn && !(wh > 0);
     if (tripOn) tripDays++;
-    rows += `<tr ${canEdit(uid)?`onclick="openKM('${k}','${uid}')" style="cursor:pointer"`:''}>
+    if (tripNoTime) tripMissing++;
+    const tripCell = !tripOn ? '—'
+      : tripNoTime ? `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#fbe7e6;color:#c0392b" title="出社/退社が未入力のため稼働時間が確認できません">⚠ 未入力</span>`
+      : `<span style="color:#1a7a3d;font-weight:600">✓</span> <span style="font-size:11px;color:var(--color-text-secondary)">${fH(wh)}</span>`;
+    rows += `<tr ${canEdit(uid)?`onclick="openKM('${k}','${uid}')"`:''} style="cursor:${canEdit(uid)?'pointer':'default'};${(tripNoTime||remRowFlag)?'background:#fdf3f2':''}">
       <td>${curM}/${d}(${DAY[w]})</td>
       <td>${e?`<span class="cbadge ${TB[e.type]}">${TL[e.type]}</span>`:'—'}</td>
       <td>${e&&e.start||'—'}</td><td>${e&&e.end||'—'}</td>
       <td>${e&&wh?fH(wh):'—'}</td>
       <td>${e&&e.breakMin!=null?e.breakMin+'分':'—'}</td>
-      <td>${gradeBadge(remMark)}</td>
-      <td>${tripOn?'✓':'—'}</td>
+      <td>${remInfo.html}</td>
+      <td>${tripCell}</td>
       <td>${dh?dh+'H':'—'}</td>
       <td>${dh?topTaskLabel(te):'—'}</td>
     </tr>`;
@@ -706,8 +731,8 @@ function renderList() {
     <div class="dcard"><div class="dcard-label">総稼働時間</div><div class="dcard-val" style="font-size:18px">${fH(th)}</div></div>
     <div class="dcard"><div class="dcard-label">有給取得</div><div class="dcard-val">${pd}<span class="dcard-unit">日</span></div></div>
     <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${tkh}<span class="dcard-unit">H</span></div></div>
-    <div class="dcard"><div class="dcard-label">在宅（◎8H+／〇4H+／△1H+）</div><div class="dcard-val" style="font-size:14px;display:flex;align-items:center">${gradeCountsLabel(remCounts)}</div></div>
-    <div class="dcard"><div class="dcard-label">出張</div><div class="dcard-val">${tripDays}<span class="dcard-unit">日</span></div></div>`;
+    <div class="dcard"><div class="dcard-label">在宅（◎8H+／〇4H+／△1H+）</div><div class="dcard-val" style="font-size:14px;display:flex;align-items:center">${remoteCountsLabel(remCounts)}</div></div>
+    <div class="dcard"><div class="dcard-label">出張</div><div class="dcard-val">${tripDays}<span class="dcard-unit">日</span></div>${tripMissing?`<div style="font-size:11px;color:#c0392b;margin-top:3px">⚠ 時間未入力 ${tripMissing}日</div>`:''}</div>`;
 }
 
 // ============================================================
@@ -1414,9 +1439,11 @@ function loadDayFields(k, uid) {
   document.getElementById('mk-trip').checked = !!e.trip;
   document.getElementById('mk-umeda').checked = !!e.umeda;
   document.getElementById('mk-paidhour').value = e.paidHour || 0;
+  rhAutoMode = (e.remoteHourAuto !== false);
   document.getElementById('mk-remotehour').value = e.remoteHour || 0;
   toggleRemoteHourField();
-  calcKintaiTime();
+  updateRhAutoUI();
+  calcKintaiTime(); // 在宅チェック時・自動モード時はここで在宅稼働時間も再計算される
   document.getElementById('mk-del').style.display = md[k] ? '' : 'none';
 
   document.getElementById('ta-proj-input').value = '';
@@ -1461,6 +1488,58 @@ function toggleRemoteHourField() {
   wrap.style.display = checked ? '' : 'none';
 }
 
+// 「在宅」チェックのON/OFF時：表示切替＋自動モードなら即計算
+function onRemoteCheckChange() {
+  toggleRemoteHourField();
+  if (document.getElementById('mk-r').checked) applyAutoRemoteHour();
+  updateRhAutoUI();
+}
+
+// 出社/退社/休憩から稼働時間（分）を計算するだけの軽量ヘルパー
+function computeWorkMinutes() {
+  const s = document.getElementById('mk-s').value;
+  const e = document.getElementById('mk-e').value;
+  const bParsed = parseInt(document.getElementById('mk-b').value);
+  const b = isNaN(bParsed) ? 0 : bParsed;
+  if (!s || !e) return 0;
+  const sh = parseInt(s)*60 + parseInt(s.slice(3));
+  const eh = parseInt(e)*60 + parseInt(e.slice(3));
+  return Math.max(0, eh - sh - b);
+}
+
+// 在宅チェック済み＆自動モードの場合のみ、稼働時間から在宅稼働時間を自動で埋める
+// （.value への代入は input イベントを発火させないため、手動入力フラグは立たない）
+function applyAutoRemoteHour() {
+  const rEl = document.getElementById('mk-r');
+  const hEl = document.getElementById('mk-remotehour');
+  if (!rEl || !hEl || !rEl.checked || !rhAutoMode) return;
+  const mins = computeWorkMinutes();
+  hEl.value = Math.round((mins/60)*2)/2; // 0.5h単位に丸め
+}
+
+// ユーザーが在宅稼働時間を直接編集した場合は手動モードに切り替える
+function onRemoteHourManualInput() {
+  rhAutoMode = false;
+  updateRhAutoUI();
+}
+
+// 自動計算モードに戻す（手動入力の上書きを解除）
+function resetRemoteHourAuto() {
+  rhAutoMode = true;
+  applyAutoRemoteHour();
+  updateRhAutoUI();
+}
+
+// 現在のモード（自動／手動）をラベルとリセットボタンに反映
+function updateRhAutoUI() {
+  const modeEl = document.getElementById('mk-remotehour-mode');
+  const resetBtn = document.getElementById('mk-remotehour-reset');
+  if (!modeEl) return;
+  modeEl.textContent = rhAutoMode ? '自動計算' : '手動入力';
+  modeEl.style.color = rhAutoMode ? '#185fa5' : '#a3650b';
+  if (resetBtn) resetBtn.style.display = rhAutoMode ? 'none' : '';
+}
+
 // 出社/退社時刻に定時をセット
 function setStd(fieldId, val) {
   document.getElementById(fieldId).value = val;
@@ -1486,7 +1565,8 @@ async function saveDay() {
     trip: document.getElementById('mk-trip').checked,
     umeda: document.getElementById('mk-umeda').checked,
     paidHour: parseFloat(document.getElementById('mk-paidhour').value) || 0,
-    remoteHour: parseFloat(document.getElementById('mk-remotehour').value) || 0
+    remoteHour: parseFloat(document.getElementById('mk-remotehour').value) || 0,
+    remoteHourAuto: rhAutoMode
   };
   const entries = gT(tmUID)[k] || [];
   showLoading('保存中...');
@@ -1716,6 +1796,7 @@ function duplicateLastEntry() {
 }
 
 function calcKintaiTime() {
+  applyAutoRemoteHour(); // 在宅チェック＆自動モード時は稼働時間から在宅稼働時間を再計算
   const s = document.getElementById('mk-s').value;
   const e = document.getElementById('mk-e').value;
   const bParsed = parseInt(document.getElementById('mk-b').value);
@@ -3146,13 +3227,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
 <div class="fr">
   <label style="font-size:12px;color:#888;display:block;margin-bottom:6px">勤務地（複数選択可）</label>
   <div style="display:flex;gap:12px;flex-wrap:wrap">
-    <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-r" style="width:auto" onchange="toggleRemoteHourField()"> 在宅</label>
+    <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-r" style="width:auto" onchange="onRemoteCheckChange()"> 在宅</label>
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-trip" style="width:auto"> 出張</label>
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-umeda" style="width:auto"> 梅田支店</label>
   </div>
   <div id="mk-remotehour-wrap" style="display:none;margin-top:8px">
-    <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">在宅稼働時間（h）<span style="color:#aaa;font-weight:400">※在宅で稼働した時間を入力してください（集計タブの◎〇△の判定に使用）</span></label>
-    <input type="number" id="mk-remotehour" value="0" min="0" max="24" step="0.5">
+    <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">在宅稼働時間（h）<span style="color:#aaa;font-weight:400">※出社/退社時刻から自動計算されます。必要な場合のみ手動で修正してください</span></label>
+    <div style="display:flex;align-items:center;gap:8px">
+      <input type="number" id="mk-remotehour" value="0" min="0" max="24" step="0.5" oninput="onRemoteHourManualInput()" style="flex:1">
+      <span id="mk-remotehour-mode" style="font-size:11px;white-space:nowrap"></span>
+      <button type="button" class="btn btn-sm" id="mk-remotehour-reset" style="display:none;white-space:nowrap" onclick="resetRemoteHourAuto()">自動計算に戻す</button>
+    </div>
   </div>
 </div>
 
