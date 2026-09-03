@@ -352,15 +352,22 @@ function remoteMissingBadge() {
 }
 function remoteCellInfo(e) {
   if (!e || !e.remote) return { key:null, html:'—' };
-  const mark = gradeMark(e.remoteHour || 0);
+  const h = e.remoteHour || 0;
+  const mark = gradeMark(h);
   if (mark) return { key: mark, html: gradeBadge(mark) };
+  if (h > 0) {
+    // 1H未満だが値そのものは入力済み → 「未入力」警告ではなく実値をそのまま表示する
+    return { key: '1H未満', html: `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#f1efe8;color:#888" title="在宅稼働時間：${h}H（1H未満）">${h}H</span>` };
+  }
   return { key: '未入力', html: remoteMissingBadge() };
 }
 function remoteCountsLabel(counts) {
   const base = gradeCountsLabel(counts);
+  const mini = counts['1H未満'] || 0;
+  const miniHtml = mini ? `<span style="margin-left:6px;font-size:11px;color:var(--color-text-secondary)">1H未満 ${mini}件</span>` : '';
   const missing = counts['未入力'] || 0;
-  if (!missing) return base;
-  return base + `<span style="margin-left:6px">${remoteMissingBadge()}<span style="font-size:11px;color:#c0392b;font-weight:600;margin:0 2px 0 2px">${missing}</span></span>`;
+  if (!missing) return base + miniHtml;
+  return base + miniHtml + `<span style="margin-left:6px">${remoteMissingBadge()}<span style="font-size:11px;color:#c0392b;font-weight:600;margin:0 2px 0 2px">${missing}</span></span>`;
 }
 
 function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
@@ -692,7 +699,7 @@ function renderList() {
   const dim=new Date(curY,curM,0).getDate();
   const md=gK(uid), mt=gT(uid);
   let wd=0, th=0, pd=0, tkh=0, tripDays=0, tripMissing=0; let rows='';
-  const remCounts={'◎':0,'〇':0,'△':0,'未入力':0};
+  const remCounts={'◎':0,'〇':0,'△':0,'1H未満':0,'未入力':0};
   for(let d=1;d<=dim;d++) {
     const k=dk(curY,curM,d); const e=md[k]; const te=mt[k]||[];
     const dh=te.reduce((s,t)=>s+t.h,0); if(dh) tkh+=dh;
