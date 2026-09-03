@@ -1795,6 +1795,44 @@ function duplicateLastEntry() {
   }, 50);
 }
 
+// 退社時刻の文字列を "HH:MM" に正規化。日をまたぐ場合は 24〜47 時の入力を許容（例：25:00＝翌1:00）
+function normalizeExtTime(str) {
+  if (!str) return '';
+  const m = String(str).trim().match(/^([0-9]{1,2}):([0-5][0-9])$/);
+  if (!m) return null;
+  const hh = parseInt(m[1], 10);
+  if (hh > 47) return null;
+  return `${String(hh).padStart(2,'0')}:${m[2]}`;
+}
+
+// 退社時刻フィールドの入力チェック（変更時に呼び出し）
+function normalizeMkEndTime() {
+  const el = document.getElementById('mk-e');
+  const v = el.value;
+  if (!v) { calcKintaiTime(); return; }
+  const norm = normalizeExtTime(v);
+  if (norm === null) {
+    showError('退社時刻の形式が正しくありません（例：17:30 ／ 翌1:00なら 25:00）');
+    el.focus();
+    return;
+  }
+  el.value = norm;
+  calcKintaiTime();
+}
+
+// 「翌日±24h」ボタン：退社時刻に24時間を加算/解除するトグル
+function toggleNextDayEnd() {
+  const el = document.getElementById('mk-e');
+  const norm = normalizeExtTime(el.value);
+  if (!norm) { showError('先に退社時刻を入力してください'); return; }
+  const [hStr, mStr] = norm.split(':');
+  let hh = parseInt(hStr, 10);
+  hh = hh >= 24 ? hh - 24 : hh + 24;
+  if (hh < 0 || hh > 47) return;
+  el.value = `${String(hh).padStart(2,'0')}:${mStr}`;
+  calcKintaiTime();
+}
+
 function calcKintaiTime() {
   applyAutoRemoteHour(); // 在宅チェック＆自動モード時は稼働時間から在宅稼働時間を再計算
   const s = document.getElementById('mk-s').value;
@@ -3207,10 +3245,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
         <button type="button" class="btn btn-sm" onclick="setStd('mk-s','09:00')" style="white-space:nowrap">定時</button>
       </div>
       <div style="flex:1;display:flex;gap:4px;align-items:center">
-        <input type="time" id="mk-e" onchange="calcKintaiTime()" style="flex:1">
+        <input type="text" inputmode="numeric" placeholder="18:00" id="mk-e" onchange="normalizeMkEndTime()" style="flex:1">
         <button type="button" class="btn btn-sm" onclick="setStd('mk-e','18:00')" style="white-space:nowrap">定時</button>
+        <button type="button" class="btn btn-sm" onclick="toggleNextDayEnd()" style="white-space:nowrap" title="翌日にまたぐ場合、24を加算/解除します">翌日±24h</button>
       </div>
     </div>
+    <div style="font-size:11px;color:#aaa;margin-top:4px">※日をまたぐ場合は退社時刻を24以上で入力できます（例：翌1:00→25:00）。「翌日±24h」ボタンでも切替できます</div>
   </div>
   <div class="fr">
     <label>休憩（分）</label>
