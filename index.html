@@ -1888,6 +1888,24 @@ function calcKintaiTime() {
 function hm(id) { document.getElementById(id).style.display = 'none'; }
 
 // ============================================================
+// モーダル背景クリックの誤判定対策
+// フォーム内でドラッグ開始→背景で離す操作で閉じないよう、
+// 「押した場所」と「離した場所」がどちらも背景の場合だけ閉じる
+// ============================================================
+(function () {
+  let downEl = null, upEl = null;
+  document.addEventListener('pointerdown', e => { downEl = e.target; }, true);
+  document.addEventListener('pointerup',   e => { upEl = e.target; }, true);
+  document.addEventListener('click', e => {
+    const t = e.target;
+    if (t.classList && t.classList.contains('mo')) {
+      if (downEl !== t || upEl !== t) e.stopPropagation(); // 背景onclickに届かせない
+    }
+    downEl = upEl = null;
+  }, true);
+})();
+
+// ============================================================
 // インサイト
 // ============================================================
 async function renderInsight() {
