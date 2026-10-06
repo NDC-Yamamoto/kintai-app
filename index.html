@@ -372,6 +372,56 @@ function remoteCountsLabel(counts) {
 
 function dk(y,m,d) { return `${y}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`; }
 function ld(d) { return dk(d.getFullYear(), d.getMonth()+1, d.getDate()); } // ローカル日付文字列（toISOStringのUTCズレ回避）
+
+// ============================================================
+// 日本の祝日（法令ベースで年ごとに算出。振替休日・国民の休日を含む）
+// ============================================================
+const _jpHolCache = {};
+function jpHolidays(y) {
+  if (_jpHolCache[y]) return _jpHolCache[y];
+  const h = {};
+  const set = (m, d, name) => { h[dk(y, m, d)] = name; };
+  const nthMon = (m, n) => { const w = new Date(y, m-1, 1).getDay(); return 1 + ((8 - w) % 7) + (n-1)*7; };
+  const shunbun = Math.floor(20.8431 + 0.242194*(y-1980) - Math.floor((y-1980)/4));
+  const shubun  = Math.floor(23.2488 + 0.242194*(y-1980) - Math.floor((y-1980)/4));
+
+  set(1, 1, '元日');
+  set(1, nthMon(1, 2), '成人の日');
+  set(2, 11, '建国記念の日');
+  if (y >= 2020) set(2, 23, '天皇誕生日');
+  set(3, shunbun, '春分の日');
+  set(4, 29, '昭和の日');
+  set(5, 3, '憲法記念日');
+  set(5, 4, 'みどりの日');
+  set(5, 5, 'こどもの日');
+  // 海の日・山の日・スポーツの日（2020/2021は五輪特措法による移動）
+  if (y === 2020)      { set(7, 23, '海の日'); set(7, 24, 'スポーツの日'); set(8, 10, '山の日'); }
+  else if (y === 2021) { set(7, 22, '海の日'); set(7, 23, 'スポーツの日'); set(8, 8, '山の日'); }
+  else { set(7, nthMon(7, 3), '海の日'); set(8, 11, '山の日'); set(10, nthMon(10, 2), 'スポーツの日'); }
+  set(9, nthMon(9, 3), '敬老の日');
+  set(9, shubun, '秋分の日');
+  set(11, 3, '文化の日');
+  set(11, 23, '勤労感謝の日');
+
+  // 国民の休日（祝日に挟まれた平日）
+  const base = Object.keys(h).sort();
+  base.forEach(k => {
+    const d = new Date(k + 'T00:00:00'); d.setDate(d.getDate() + 2);
+    const k2 = ld(d);
+    const mid = new Date(k + 'T00:00:00'); mid.setDate(mid.getDate() + 1);
+    const km = ld(mid);
+    if (h[k2] && !h[km] && mid.getDay() !== 0) h[km] = '国民の休日';
+  });
+  // 振替休日（日曜の祝日 → 次の祝日でない日）
+  Object.keys(h).sort().forEach(k => {
+    const d = new Date(k + 'T00:00:00');
+    if (d.getDay() !== 0) return;
+    do { d.setDate(d.getDate() + 1); } while (h[ld(d)]);
+    h[ld(d)] = '振替休日';
+  });
+  return (_jpHolCache[y] = h);
+}
+function jpHolidayName(y, m, d) { return jpHolidays(y)[dk(y, m, d)] || ''; }
 function pT(t) { if(!t) return null; const [h,m]=t.split(':').map(Number); return h+m/60; }
 function fH(h) { if(!h) return '0:00'; const hh=Math.floor(h), mm=Math.round((h-hh)*60); return `${hh}:${String(mm).padStart(2,'0')}`; }
 function cW(e) { if(!e||!e.start||!e.end) return 0; return Math.max(0, pT(e.end)-pT(e.start)-(e.breakMin!=null?e.breakMin:0)/60); }
@@ -698,13 +748,34 @@ function renderList() {
   document.getElementById('mt2').textContent = `${curY}年${curM}月`;
   const dim=new Date(curY,curM,0).getDate();
   const md=gK(uid), mt=gT(uid);
-  let wd=0, th=0, pd=0, tkh=0, tripDays=0, tripMissing=0; let rows='';
+  let wd=0, th=0, pd=0, tkh=0, tripDays=0, tripMissing=0, blankDays=0; let rows='';
   const remCounts={'◎':0,'〇':0,'△':0,'1H未満':0,'未入力':0};
+  const todayKey = ld(new Date());
+  const editable = canEdit(uid);
+  const rowAttr = k => editable ? `onclick="openKM('${k}','${uid}')" style="cursor:pointer;` : `style="cursor:default;`;
   for(let d=1;d<=dim;d++) {
     const k=dk(curY,curM,d); const e=md[k]; const te=mt[k]||[];
     const dh=te.reduce((s,t)=>s+t.h,0); if(dh) tkh+=dh;
-    if(!e&&!dh) continue;
-    const w=new Date(curY,curM-1,d).getDay(); const wh=cW(e);
+    const w=new Date(curY,curM-1,d).getDay();
+    const holName = jpHolidayName(curY,curM,d);
+    const offDay = w===0 || w===6 || !!holName || (e&&e.type==='holiday');
+    // 日付セル：土=青、日・祝=赤、祝日名を併記
+    const dColor = (w===0||holName||(e&&e.type==='holiday')) ? '#E24B4A' : w===6 ? '#378ADD' : '';
+    const dateCell = `<td style="white-space:nowrap;${dColor?`color:${dColor};`:''}${offDay?'background:#fce4ec;':''}">${curM}/${d}(${DAY[w]})${holName?`<span style="font-size:10px;margin-left:4px">${holName}</span>`:''}</td>`;
+    if(!e&&!dh) {
+      if(offDay) {
+        // 土日祝で記録なし：全列「ー」＋ピンク背景
+        rows += `<tr ${rowAttr(k)}background:#fce4ec;color:#b5838d">${dateCell}${'<td>ー</td>'.repeat(9)}</tr>`;
+      } else {
+        // 平日で記録なし：経過日は「未入力」として表示
+        const past = k < todayKey;
+        if (past) blankDays++;
+        const kubun = past ? `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#fff4d6;color:#8a6100">未入力</span>` : '—';
+        rows += `<tr ${rowAttr(k)}color:var(--color-text-secondary)">${dateCell}<td>${kubun}</td>${'<td>—</td>'.repeat(8)}</tr>`;
+      }
+      continue;
+    }
+    const wh=cW(e);
     if(e&&(e.type==='work'||e.type==='remote')) { wd++; th+=wh; }
     if(e&&e.type==='paid') pd++;
     if(e&&e.type==='half') pd+=0.5;
@@ -720,8 +791,8 @@ function renderList() {
     const tripCell = !tripOn ? '—'
       : tripNoTime ? `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#fbe7e6;color:#c0392b" title="出社/退社が未入力のため稼働時間が確認できません">⚠ 未入力</span>`
       : `<span style="color:#1a7a3d;font-weight:600">✓</span> <span style="font-size:11px;color:var(--color-text-secondary)">${fH(wh)}</span>`;
-    rows += `<tr ${canEdit(uid)?`onclick="openKM('${k}','${uid}')"`:''} style="cursor:${canEdit(uid)?'pointer':'default'};${(tripNoTime||remRowFlag)?'background:#fdf3f2':''}">
-      <td>${curM}/${d}(${DAY[w]})</td>
+    rows += `<tr ${rowAttr(k)}${(tripNoTime||remRowFlag)?'background:#fdf3f2':''}">
+      ${dateCell}
       <td>${e?`<span class="cbadge ${TB[e.type]}">${TL[e.type]}</span>`:'—'}</td>
       <td>${e&&e.start||'—'}</td><td>${e&&e.end||'—'}</td>
       <td>${e&&wh?fH(wh):'—'}</td>
@@ -734,7 +805,7 @@ function renderList() {
   }
   document.getElementById('list-body').innerHTML = rows || '<tr><td colspan="10" style="text-align:center;color:var(--color-text-secondary);padding:1.5rem">記録なし</td></tr>';
   document.getElementById('stats-grid').innerHTML = `
-    <div class="dcard"><div class="dcard-label">稼働日数</div><div class="dcard-val">${wd}<span class="dcard-unit">日</span></div></div>
+    <div class="dcard"><div class="dcard-label">稼働日数</div><div class="dcard-val">${wd}<span class="dcard-unit">日</span></div>${blankDays?`<div style="font-size:11px;color:#8a6100;margin-top:3px">⚠ 平日未入力 ${blankDays}日</div>`:''}</div>
     <div class="dcard"><div class="dcard-label">総稼働時間</div><div class="dcard-val" style="font-size:18px">${fH(th)}</div></div>
     <div class="dcard"><div class="dcard-label">有給取得</div><div class="dcard-val">${pd}<span class="dcard-unit">日</span></div></div>
     <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${tkh}<span class="dcard-unit">H</span></div></div>
