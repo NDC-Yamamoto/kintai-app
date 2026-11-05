@@ -1532,6 +1532,10 @@ function loadDayFields(k, uid) {
   document.getElementById('ta-work').innerHTML =
     '<option value="">作業区分</option>' + workTypesCache.map(w => `<option value="${w.name}">${w.name}</option>`).join('');
   updTS('');
+  // 工数エントリーをモーダルを開いた時点で時間の多い順に並べる（同時間は元の順を維持）
+  // ※ ±ボタン操作中に行が動かないよう、並べ替えは開いた時の1回だけ
+  const teSort = gT(uid)[k];
+  if (teSort && teSort.length > 1) teSort.sort((a,b) => b.h - a.h);
   renderTEL(k);
   renderTplBtns();
   document.getElementById('nh-val').textContent = newH;
