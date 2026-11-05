@@ -724,6 +724,9 @@ function renderCalendar() {
 // 集計
 // ============================================================
 // 作業区分・事業区分の優先度を返す（数字が小さいほど優先度が高い）
+// 工数の時間を小数第1位まで表示（1 → 1.0、2.5 → 2.5）
+function fH1(h) { return (Math.round((Number(h)||0)*10)/10).toFixed(1); }
+
 function taskPriority(entry) {
   const workTier = { '保守':1, '導入':1, '営業':2 }[entry.work_type] || 3;
   const bizTier  = { '直営':1, '公共':2 }[entry.biz_type] || 3;
@@ -740,7 +743,7 @@ function topTaskLabel(entries) {
     return b.h - a.h;
   })[0];
   const others = entries.length - 1;
-  return `${top.proj} - ${top.task}（${top.h}H）${others > 0 ? ` <span style="color:var(--color-text-secondary);font-size:10px">他${others}件</span>` : ''}`;
+  return `${top.proj} - ${top.task}（${fH1(top.h)}H）${others > 0 ? ` <span style="color:var(--color-text-secondary);font-size:10px">他${others}件</span>` : ''}`;
 }
 
 function renderList() {
@@ -1538,7 +1541,7 @@ function loadDayFields(k, uid) {
   if (teSort && teSort.length > 1) teSort.sort((a,b) => b.h - a.h);
   renderTEL(k);
   renderTplBtns();
-  document.getElementById('nh-val').textContent = newH;
+  document.getElementById('nh-val').textContent = fH1(newH);
   document.getElementById('tpl-save-name').value = '';
   document.getElementById('mt-kintai-info').innerHTML = refWorkInfo(uid, k);
 }
@@ -1776,13 +1779,13 @@ function renderTEL(k) {
       <span style="flex:1;color:#888">${t.task}</span>
       ${t.biz_type ? `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#eaf3de;color:#3b6d11">${t.biz_type}</span>` : ''}
       ${t.work_type ? `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:#faeeda;color:#854f0b">${t.work_type}</span>` : ''}
-      <div class="hs"><button onclick="adjTE(${i},-0.5)">−</button><span>${t.h}H</span><button onclick="adjTE(${i},0.5)">＋</button></div>
+      <div class="hs"><button onclick="adjTE(${i},-0.5)">−</button><span>${fH1(t.h)}H</span><button onclick="adjTE(${i},0.5)">＋</button></div>
       <span style="cursor:pointer;color:#aaa" onclick="delTE(${i})"><i class="ti ti-trash"></i></span>
     </div>`
   ).join('');
   if (!h) h = '<div style="color:#aaa;font-size:11px;padding:8px 4px">エントリーを追加してください</div>';
   document.getElementById('tel').innerHTML = h;
-  document.getElementById('mt-tot').textContent = tot;
+  document.getElementById('mt-tot').textContent = fH1(tot);
 }
 
 function adjTE(i, d) {
@@ -1847,7 +1850,7 @@ async function addTaskAndSelect(name) {
   } catch(e) { showError(e.message); }
 }
 
-function adjNH(d) { newH = Math.max(0.5, newH + d); document.getElementById('nh-val').textContent = newH; }
+function adjNH(d) { newH = Math.max(0.5, newH + d); document.getElementById('nh-val').textContent = fH1(newH); }
 
 function addTE() {
   const proj = document.getElementById('ta-proj-input').value.trim();
