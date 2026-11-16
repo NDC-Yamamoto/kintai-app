@@ -108,11 +108,11 @@ async function apiFetchKintai(userId, year, month) {
       breakMin: r.break_min,
       remote: r.is_remote,
       trip: r.loc_trip,
-      umeda: r.loc_umeda,
       paidHour: r.paid_hour ? parseFloat(r.paid_hour) : 0,
       remoteHour: r.remote_hour ? parseFloat(r.remote_hour) : 0,
       remoteHourAuto: r.remote_hour_auto !== false
     };
+    BRANCHES.forEach(b => { map[r.date][b.key] = !!r[b.col]; });
   });
   return map;
 }
@@ -128,11 +128,11 @@ async function apiSaveKintai(userId, date, entry) {
     is_remote: !!entry.remote,
     loc_remote: !!entry.remote,
     loc_trip: !!entry.trip,
-    loc_umeda: !!entry.umeda,
     paid_hour: entry.paidHour || 0,
     remote_hour: entry.remoteHour || 0,
     remote_hour_auto: entry.remoteHourAuto !== false
   };
+  BRANCHES.forEach(b => { record[b.col] = !!entry[b.key]; });
   const { error } = await sb.from('kintai_records').upsert(record, { onConflict: 'user_id,date' });
   if (error) throw error;
 }
@@ -327,6 +327,30 @@ let rhAutoMode = true; // 在宅稼働時間を自動計算するか（false=手
 // ============================================================
 const DAY = ['日','月','火','水','木','金','土'];
 const TL = { work:'出勤', paid:'有給', half:'半休', holiday:'祝日', remote:'在宅' };
+// ============================================================
+// 支店マスタ：他支店で稼働する場合はここに1行追加し、kintai_recordsに同名のBOOLEAN列を追加する
+//   例) { key:'hakata', col:'loc_hakata', label:'博多支店', short:'博', bg:'#e6f1fb', fg:'#185fa5' }
+//   SQL) ALTER TABLE public.kintai_records ADD COLUMN loc_hakata BOOLEAN DEFAULT FALSE;
+// ============================================================
+const BRANCHES = [
+  { key:'umeda', col:'loc_umeda', label:'梅田支店', short:'梅', bg:'#efe8fb', fg:'#5b3fa8' },
+];
+function branchBadge(b) {
+  return `<span style="display:inline-block;min-width:18px;text-align:center;font-size:12px;font-weight:600;padding:0 5px;border-radius:8px;background:${b.bg};color:${b.fg};margin-right:2px" title="${b.label}">${b.short}</span>`;
+}
+function branchCellHtml(e) {
+  if (!e) return '—';
+  const on = BRANCHES.filter(b => e[b.key]);
+  return on.length ? on.map(branchBadge).join('') : '—';
+}
+// 日次エディタの支店チェックボックスをマスタから生成
+function renderBranchChecks(e) {
+  const wrap = document.getElementById('mk-branches');
+  if (!wrap) return;
+  wrap.innerHTML = BRANCHES.map(b =>
+    `<label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-br-${b.key}" style="width:auto"${e&&e[b.key]?' checked':''}> ${b.label}</label>`
+  ).join('');
+}
 const TB = { work:'bw', paid:'bp', half:'bh', holiday:'bho', remote:'br' };
 
 // 稼働時間の粒度に応じた記号（◎:8H以上／〇:4H以上8H未満／△:1H以上4H未満）
@@ -752,6 +776,7 @@ function renderList() {
   const dim=new Date(curY,curM,0).getDate();
   const md=gK(uid), mt=gT(uid);
   let wd=0, th=0, pd=0, tkh=0, tripDays=0, tripMissing=0, blankDays=0; let rows='';
+  const brDays = Object.fromEntries(BRANCHES.map(b => [b.key, 0]));
   const remCounts={'◎':0,'〇':0,'△':0,'1H未満':0,'未入力':0};
   const todayKey = ld(new Date());
   const editable = canEdit(uid);
@@ -768,13 +793,13 @@ function renderList() {
     if(!e&&!dh) {
       if(offDay) {
         // 土日祝で記録なし：全列「ー」＋ピンク背景
-        rows += `<tr ${rowAttr(k)}background:#fce4ec;color:#b5838d">${dateCell}${'<td>ー</td>'.repeat(9)}</tr>`;
+        rows += `<tr ${rowAttr(k)}background:#fce4ec;color:#b5838d">${dateCell}${'<td>ー</td>'.repeat(10)}</tr>`;
       } else {
         // 平日で記録なし：経過日は「未入力」として表示
         const past = k < todayKey;
         if (past) blankDays++;
         const kubun = past ? `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#fff4d6;color:#8a6100">未入力</span>` : '—';
-        rows += `<tr ${rowAttr(k)}color:var(--color-text-secondary)">${dateCell}<td>${kubun}</td>${'<td>—</td>'.repeat(8)}</tr>`;
+        rows += `<tr ${rowAttr(k)}color:var(--color-text-secondary)">${dateCell}<td>${kubun}</td>${'<td>—</td>'.repeat(9)}</tr>`;
       }
       continue;
     }
@@ -790,6 +815,7 @@ function renderList() {
     const tripOn = !!(e&&e.trip);
     const tripNoTime = tripOn && !(wh > 0);
     if (tripOn) tripDays++;
+    BRANCHES.forEach(b => { if (e && e[b.key]) brDays[b.key]++; });
     if (tripNoTime) tripMissing++;
     const tripCell = !tripOn ? '—'
       : tripNoTime ? `<span style="display:inline-block;font-size:11px;font-weight:600;padding:0 6px;border-radius:8px;background:#fbe7e6;color:#c0392b" title="出社/退社が未入力のため稼働時間が確認できません">⚠ 未入力</span>`
@@ -802,18 +828,20 @@ function renderList() {
       <td>${e&&e.breakMin!=null?e.breakMin+'分':'—'}</td>
       <td>${remInfo.html}</td>
       <td>${tripCell}</td>
+      <td style="white-space:nowrap">${branchCellHtml(e)}</td>
       <td>${dh?dh+'H':'—'}</td>
       <td>${dh?topTaskLabel(te):'—'}</td>
     </tr>`;
   }
-  document.getElementById('list-body').innerHTML = rows || '<tr><td colspan="10" style="text-align:center;color:var(--color-text-secondary);padding:1.5rem">記録なし</td></tr>';
+  document.getElementById('list-body').innerHTML = rows || '<tr><td colspan="11" style="text-align:center;color:var(--color-text-secondary);padding:1.5rem">記録なし</td></tr>';
   document.getElementById('stats-grid').innerHTML = `
     <div class="dcard"><div class="dcard-label">稼働日数</div><div class="dcard-val">${wd}<span class="dcard-unit">日</span></div>${blankDays?`<div style="font-size:11px;color:#8a6100;margin-top:3px">⚠ 平日未入力 ${blankDays}日</div>`:''}</div>
     <div class="dcard"><div class="dcard-label">総稼働時間</div><div class="dcard-val" style="font-size:18px">${fH(th)}</div></div>
     <div class="dcard"><div class="dcard-label">有給取得</div><div class="dcard-val">${pd}<span class="dcard-unit">日</span></div></div>
     <div class="dcard"><div class="dcard-label">工数合計</div><div class="dcard-val">${tkh}<span class="dcard-unit">H</span></div></div>
     <div class="dcard"><div class="dcard-label">在宅（◎8H+／〇4H+／△1H+）</div><div class="dcard-val" style="font-size:14px;display:flex;align-items:center">${remoteCountsLabel(remCounts)}</div></div>
-    <div class="dcard"><div class="dcard-label">出張</div><div class="dcard-val">${tripDays}<span class="dcard-unit">日</span></div>${tripMissing?`<div style="font-size:11px;color:#c0392b;margin-top:3px">⚠ 時間未入力 ${tripMissing}日</div>`:''}</div>`;
+    <div class="dcard"><div class="dcard-label">出張</div><div class="dcard-val">${tripDays}<span class="dcard-unit">日</span></div>${tripMissing?`<div style="font-size:11px;color:#c0392b;margin-top:3px">⚠ 時間未入力 ${tripMissing}日</div>`:''}</div>
+    <div class="dcard"><div class="dcard-label">支店稼働</div><div class="dcard-val" style="font-size:14px;display:flex;align-items:center;flex-wrap:wrap;gap:4px">${BRANCHES.map(b=>`${branchBadge(b)}<span style="font-size:11px;color:var(--color-text-secondary);margin-right:6px">${brDays[b.key]}日</span>`).join('')}</div></div>`;
 }
 
 // ============================================================
@@ -1518,7 +1546,7 @@ function loadDayFields(k, uid) {
   document.getElementById('mk-b').value = e.breakMin != null ? e.breakMin : 0;
   document.getElementById('mk-r').checked = !!e.remote;
   document.getElementById('mk-trip').checked = !!e.trip;
-  document.getElementById('mk-umeda').checked = !!e.umeda;
+  renderBranchChecks(e);
   document.getElementById('mk-paidhour').value = e.paidHour || 0;
   rhAutoMode = (e.remoteHourAuto !== false);
   document.getElementById('mk-remotehour').value = e.remoteHour || 0;
@@ -1648,7 +1676,7 @@ async function saveDay() {
     breakMin: parseInt(document.getElementById('mk-b').value) || 0,
     remote: document.getElementById('mk-r').checked,
     trip: document.getElementById('mk-trip').checked,
-    umeda: document.getElementById('mk-umeda').checked,
+    ...Object.fromEntries(BRANCHES.map(b => [b.key, !!document.getElementById('mk-br-'+b.key)?.checked])),
     paidHour: parseFloat(document.getElementById('mk-paidhour').value) || 0,
     remoteHour: parseFloat(document.getElementById('mk-remotehour').value) || 0,
     remoteHourAuto: rhAutoMode
@@ -3095,7 +3123,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
       <button class="btn btn-sm" onclick="goToday()" style="margin-left:auto">今月</button>
     </div>
     <div class="stats-grid" id="stats-grid"></div>
-    <table class="dt"><thead><tr><th>日付</th><th>区分</th><th>出社</th><th>退社</th><th>稼働</th><th>休憩</th><th>在宅</th><th>出張</th><th>工数</th><th>主なタスク</th></tr></thead><tbody id="list-body"></tbody></table>
+    <table class="dt"><thead><tr><th>日付</th><th>区分</th><th>出社</th><th>退社</th><th>稼働</th><th>休憩</th><th>在宅</th><th>出張</th><th>支店</th><th>工数</th><th>主なタスク</th></tr></thead><tbody id="list-body"></tbody></table>
   </div>
 
   <!-- Workload -->
@@ -3385,7 +3413,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Hiragino Sans','Yu Gothic',sa
   <div style="display:flex;gap:12px;flex-wrap:wrap">
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-r" style="width:auto" onchange="onRemoteCheckChange()"> 在宅</label>
     <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-trip" style="width:auto"> 出張</label>
-    <label style="font-size:13px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="mk-umeda" style="width:auto"> 梅田支店</label>
+    <span id="mk-branches" style="display:contents"></span>
   </div>
   <div id="mk-remotehour-wrap" style="display:none;margin-top:8px">
     <label style="font-size:12px;color:#888;display:block;margin-bottom:4px">在宅稼働時間（h）<span style="color:#aaa;font-weight:400">※出社/退社時刻から自動計算されます。必要な場合のみ手動で修正してください</span></label>
